@@ -3,7 +3,10 @@ import { importedTestSchema, formatZodIssues } from "../_shared/schema.ts";
 import { groupTelemetryEvents } from "../_shared/domain.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+// Supabase-hosted functions normally expose SUPABASE_SERVICE_ROLE_KEY. The
+// explicit fallback keeps deployments portable across projects using scoped
+// function secrets.
+const SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "http://127.0.0.1:5173,http://localhost:5173").split(",");
 const service = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { auth: { persistSession: false } });
@@ -325,6 +328,7 @@ Deno.serve(async (req) => {
   } catch (error) {
     if (error instanceof Response) return error;
     const message = error instanceof Error ? error.message : "Неизвестная ошибка";
+    console.error("api_request_failed", message);
     const safeCode = message.includes("deadline_passed") ? "deadline_passed" : message.includes("attempt_closed") ? "attempt_closed" : "server_error";
     return fail(origin, safeCode, safeCode === "server_error" ? "Сервер не смог выполнить операцию" : "Попытка уже завершена или время истекло", safeCode === "server_error" ? 500 : 409);
   }
