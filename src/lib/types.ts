@@ -10,7 +10,7 @@ export type SafeQuestion = {
   points: number; position: number; options: Array<{ id: string; text: string }>; topics: string[];
 };
 export type AttemptState = {
-  attempt: { id: string; status: string; started_at: string; deadline_at: string; revision: number; score_points: number | null; max_points: number | null; score_percent: number | null; submitted_at: string | null };
+  attempt: { id: string; status: string; started_at: string; deadline_at: string; revision: number; server_time: string; last_event_sequence: number; score_points: number | null; max_points: number | null; score_percent: number | null; submitted_at: string | null };
   questions: SafeQuestion[];
   answers: Record<string, string[]>;
 };
@@ -20,4 +20,5 @@ export type Report = {
   attempt: { id: string; status: string; started_at: string; submitted_at: string | null; duration_seconds: number | null; score_points: number; max_points: number; score_percent: number };
   items?: Array<{ question_id: string; stable_id: string; text: string; selected: Array<{ id: string; text: string }>; correct: Array<{ id: string; text: string }>; explanation: string; earned_points: number; max_points: number; is_correct: boolean }>;
   topics?: Array<{ id: string; name: string; earned: number; max: number; count: number; percentage: number; status: "review" | "reinforce" | "successful"; limited_evidence: boolean }>;
+  event_intervals?: Array<{ started_at: string; ended_at: string; types: string[]; summary: string }>;
 };

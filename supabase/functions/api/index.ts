@@ -1,5 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import { importedTestSchema, formatZodIssues } from "../_shared/schema.ts";
+import { groupTelemetryEvents } from "../_shared/domain.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -64,6 +65,15 @@ async function resolveSession(token: unknown) {
   return data?.[0]?.attempt_id as string | undefined;
 }
 
+async function enforceRateLimit(origin: string | null, tokenHash: string, action: "resolve" | "start", limit: number) {
+  const { data, error } = await service.rpc("server_check_rate_limit", {
+    p_key_hash: tokenHash, p_action: action, p_limit: limit, p_window_seconds: 60,
+  });
+  if (error) throw error;
+  const result = data?.[0];
+  if (!result?.allowed) throw fail(origin, "rate_limited", "Слишком много запросов. Повторите позже.", 429, { retry_after_seconds: result?.retry_after_seconds ?? 60 });
+}
+
 async function dashboard(teacher: string) {
   const [studentsResult, testsResult, assignmentsResult] = await Promise.all([
     service.from("students").select("id,first_name,last_name,note,created_at").eq("teacher_id", teacher).order("created_at", { ascending: false }),
@@ -76,7 +86,7 @@ async function dashboard(teacher: string) {
 
 async function safeAttempt(attemptId: string) {
   const { data: attempt, error } = await service.from("attempts")
-    .select("id,status,started_at,deadline_at_snapshot,last_client_revision,score_points,max_points,score_percent,submitted_at,version_id,assignment_id,attempt_answers(question_id,selected_option_ids,client_revision)")
+    .select("id,status,started_at,deadline_at_snapshot,last_client_revision,last_event_sequence,score_points,max_points,score_percent,submitted_at,version_id,assignment_id,attempt_answers(question_id,selected_option_ids,client_revision)")
     .eq("id", attemptId).single();
   if (error) throw error;
   if (attempt.status === "in_progress" && new Date(attempt.deadline_at_snapshot).getTime() <= Date.now()) {
@@ -93,6 +103,7 @@ async function safeAttempt(attemptId: string) {
       deadline_at: attempt.deadline_at_snapshot, revision: attempt.last_client_revision,
       score_points: attempt.score_points, max_points: attempt.max_points,
       score_percent: attempt.score_percent, submitted_at: attempt.submitted_at,
+      server_time: new Date().toISOString(), last_event_sequence: attempt.last_event_sequence,
     },
     questions: (questions ?? []).map((question) => ({
       id: question.id, stable_id: question.stable_id, type: question.type, text: question.text,
@@ -104,7 +115,7 @@ async function safeAttempt(attemptId: string) {
   };
 }
 
-async function buildReport(attemptId: string, reveal: boolean) {
+async function buildReport(attemptId: string, reveal: boolean, includeEvents = false) {
   const { data: attempt, error } = await service.from("attempts")
     .select("id,status,started_at,submitted_at,duration_seconds,score_points,max_points,score_percent,version_id,assignment_id")
     .eq("id", attemptId).single();
@@ -141,7 +152,14 @@ async function buildReport(attemptId: string, reveal: boolean) {
     const percentage = topic.max ? Math.round((topic.earned / topic.max) * 10000) / 100 : 0;
     return { ...topic, percentage, status: percentage < 60 ? "review" : percentage < 80 ? "reinforce" : "successful", limited_evidence: topic.count < 3 };
   });
-  return { revealed: true, attempt, items, topics };
+  let eventIntervals: ReturnType<typeof groupTelemetryEvents> | undefined;
+  if (includeEvents) {
+    const { data: events, error: eventsError } = await service.from("attempt_events")
+      .select("type,client_occurred_at,received_at").eq("attempt_id", attemptId).order("sequence");
+    if (eventsError) throw eventsError;
+    eventIntervals = groupTelemetryEvents(events ?? []);
+  }
+  return { revealed: true, attempt, items, topics, event_intervals: eventIntervals };
 }
 
 Deno.serve(async (req) => {
@@ -207,12 +225,14 @@ Deno.serve(async (req) => {
         const attemptId = String(payload.attempt_id ?? "");
         const { data: allowed } = await service.from("attempts").select("id,assignments!inner(teacher_id)").eq("id", attemptId).eq("assignments.teacher_id", teacher).maybeSingle();
         if (!allowed) return fail(origin, "not_found", "Попытка не найдена", 404);
-        return reply(origin, await buildReport(attemptId, true));
+        return reply(origin, await buildReport(attemptId, true, true));
       }
       case "student.resolve": {
         const token = String(payload.token ?? "");
         if (token.length < 30 || token.length > 100) return fail(origin, "invalid_link", "Ссылка недействительна", 404);
-        const { data, error } = await service.rpc("server_resolve_assignment", { p_token_hash: await sha256Bytea(token) });
+        const tokenHash = await sha256Bytea(token);
+        await enforceRateLimit(origin, tokenHash, "resolve", 10);
+        const { data, error } = await service.rpc("server_resolve_assignment", { p_token_hash: tokenHash });
         if (error) throw error;
         const assignment = data?.[0];
         if (!assignment) return fail(origin, "invalid_link", "Ссылка истекла или отозвана", 404);
@@ -222,7 +242,10 @@ Deno.serve(async (req) => {
         const token = String(payload.token ?? "");
         const firstName = String(payload.first_name ?? "").trim(); const lastName = String(payload.last_name ?? "").trim();
         if (!firstName || !lastName || firstName.length > 100 || lastName.length > 100) return fail(origin, "invalid_name", "Укажите имя и фамилию");
-        const { data: resolved, error: resolveError } = await service.rpc("server_resolve_assignment", { p_token_hash: await sha256Bytea(token) });
+        if (token.length < 30 || token.length > 100) return fail(origin, "invalid_link", "Ссылка недействительна", 404);
+        const tokenHash = await sha256Bytea(token);
+        await enforceRateLimit(origin, tokenHash, "start", 5);
+        const { data: resolved, error: resolveError } = await service.rpc("server_resolve_assignment", { p_token_hash: tokenHash });
         if (resolveError) throw resolveError;
         if (!resolved?.[0]) return fail(origin, "invalid_link", "Ссылка истекла или отозвана", 404);
         const sessionToken = randomToken();
@@ -242,6 +265,15 @@ Deno.serve(async (req) => {
         const revision = Number(payload.revision); const answers = Array.isArray(payload.answers) ? payload.answers : [];
         if (!Number.isSafeInteger(revision) || revision < 1 || answers.length > 200) return fail(origin, "invalid_save", "Некорректная ревизия или ответы");
         const { data, error } = await service.rpc("server_save_answers", { p_attempt_id: attemptId, p_revision: revision, p_answers: answers });
+        if (error) throw error;
+        return reply(origin, data);
+      }
+      case "student.events": {
+        const attemptId = await resolveSession(payload.session_token);
+        if (!attemptId) return fail(origin, "invalid_session", "Сессия истекла", 401);
+        const events = Array.isArray(payload.events) ? payload.events : [];
+        if (!events.length || events.length > 50) return fail(origin, "invalid_event_batch", "Некорректный пакет событий");
+        const { data, error } = await service.rpc("server_record_events", { p_attempt_id: attemptId, p_events: events });
         if (error) throw error;
         return reply(origin, data);
       }

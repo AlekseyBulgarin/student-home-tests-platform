@@ -38,3 +38,48 @@ export function topicStatus(percentage: number, reviewBelow = 60, reinforceBelow
   if (percentage < reinforceBelow) return "reinforce" as const;
   return "successful" as const;
 }
+
+export type TelemetryEvent = {
+  type: string;
+  client_occurred_at: string;
+  received_at?: string;
+};
+
+export type TelemetryInterval = {
+  started_at: string;
+  ended_at: string;
+  types: string[];
+  summary: string;
+};
+
+const eventLabels: Record<string, string> = {
+  fullscreen_exit: "выход из полноэкранного режима",
+  fullscreen_enter: "возврат в полноэкранный режим",
+  visibility_hidden: "вкладка скрыта",
+  visibility_visible: "вкладка снова видима",
+  window_blur: "окно потеряло фокус",
+  window_focus: "окно получило фокус",
+  copy_attempt: "стандартная попытка копирования в задании",
+  offline: "потеря соединения",
+  online: "соединение восстановлено",
+};
+
+export function groupTelemetryEvents(events: TelemetryEvent[], windowMs = 2500): TelemetryInterval[] {
+  const sorted = [...events].sort((a, b) => Date.parse(a.client_occurred_at) - Date.parse(b.client_occurred_at));
+  const groups: TelemetryEvent[][] = [];
+  for (const event of sorted) {
+    const group = groups.at(-1);
+    const last = group?.at(-1);
+    if (!group || !last || Date.parse(event.client_occurred_at) - Date.parse(last.client_occurred_at) > windowMs) groups.push([event]);
+    else group.push(event);
+  }
+  return groups.map((group) => {
+    const types = [...new Set(group.map((event) => event.type))];
+    return {
+      started_at: group[0].client_occurred_at,
+      ended_at: group[group.length - 1].client_occurred_at,
+      types,
+      summary: types.map((type) => eventLabels[type] ?? type).join(", "),
+    };
+  });
+}
