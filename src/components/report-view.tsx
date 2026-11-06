@@ -1,0 +1,10 @@
+import type { Report } from "@/lib/types";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+
+export function ReportView({ report }: { report: Report }) {
+  return <div className="flex flex-col gap-5"><div className="grid grid-cols-3 gap-3"><Card><CardHeader><CardDescription>Баллы</CardDescription><CardTitle>{report.attempt.score_points}/{report.attempt.max_points}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>Процент</CardDescription><CardTitle>{report.attempt.score_percent}%</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>Статус</CardDescription><CardTitle className="text-base">{report.attempt.status}</CardTitle></CardHeader></Card></div>
+    {report.topics?.length ? <div className="flex flex-col gap-2"><h3 className="font-semibold">Темы</h3>{report.topics.map((topic) => <div key={topic.id} className="flex items-center justify-between rounded-lg border p-3"><div><p className="font-medium">{topic.name}</p><p className="text-xs text-muted-foreground">{topic.count} вопросов · {topic.earned}/{topic.max} баллов{topic.limited_evidence ? " · вывод ограничен" : ""}</p></div><Badge variant={topic.status === "successful" ? "default" : "secondary"}>{topic.percentage}%</Badge></div>)}</div> : null}
+    {report.items?.length ? <div className="flex flex-col gap-3"><h3 className="font-semibold">Ответы</h3>{report.items.map((item) => <Card key={item.question_id}><CardHeader><CardTitle className="text-base">{item.text}</CardTitle><CardDescription>{item.earned_points}/{item.max_points} баллов</CardDescription></CardHeader><CardContent className="flex flex-col gap-2 text-sm"><p><span className="font-medium">Ответ ученика:</span> {item.selected.map((option) => option.text).join(", ") || "нет ответа"}</p><p><span className="font-medium">Правильный ответ:</span> {item.correct.map((option) => option.text).join(", ")}</p><p className="text-muted-foreground">{item.explanation}</p></CardContent></Card>)}</div> : null}
+  </div>;
+}

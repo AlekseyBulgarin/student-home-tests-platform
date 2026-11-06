@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "title": "Основы дробей",
+  "description": "Короткий тест по сложению и сравнению обыкновенных дробей.",
+  "settings": {
+    "time_limit_minutes": 20,
+    "disclosure_policy": "after_deadline"
+  },
+  "questions": [
+    {
+      "id": "fractions-01",
+      "type": "single_choice",
+      "text": "Чему равна сумма 1/4 + 2/4?",
+      "options": [
+        { "id": "a", "text": "3/4", "explanation": "Знаменатели равны, поэтому складываем числители." },
+        { "id": "b", "text": "3/8" },
+        { "id": "c", "text": "1/2" }
+      ],
+      "correct_option_ids": ["a"],
+      "points": 1,
+      "topics": ["Сложение дробей"],
+      "explanation": "При одинаковых знаменателях складываются только числители."
+    },
+    {
+      "id": "fractions-02",
+      "type": "multiple_choice",
+      "text": "Выберите все дроби, равные 1/2.",
+      "options": [
+        { "id": "a", "text": "2/4" },
+        { "id": "b", "text": "3/6" },
+        { "id": "c", "text": "4/10" },
+        { "id": "d", "text": "5/10" }
+      ],
+      "correct_option_ids": ["a", "b", "d"],
+      "points": 3,
+      "topics": ["Сокращение дробей", "Сравнение дробей"],
+      "explanation": "Равные дроби получаются умножением числителя и знаменателя на одно число."
+    }
+  ]
+}
