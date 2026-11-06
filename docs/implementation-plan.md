@@ -9,7 +9,7 @@
 
 Проверки: целостность документации и отсутствие реализации/секретов. Не проверено: поведение Supabase, SQL и UI — они ещё не созданы.
 
-## Этап 2 — рабочий сквозной сценарий (реализован, ожидает интеграционной проверки с Docker)
+## Этап 2 — рабочий сквозной сценарий (завершён и проверен с Docker)
 
 1. Инициализировать Vite/React/TypeScript, Tailwind и shadcn/ui.
 2. Настроить Supabase local development, миграции, seed и типы БД.
@@ -20,9 +20,9 @@
 7. Реализовать start/resume, безопасную проекцию вопросов и прохождение.
 8. Реализовать серверное оценивание, disclosure policy и оба отчёта.
 
-Проверки этапа: unit-тесты схемы/оценивания, SQL/RLS integration-тесты и Playwright happy path `импорт → назначение → прохождение → отчёт`.
+Проверки этапа: unit-тесты схемы/оценивания, SQL/RLS integration-тесты и Playwright happy path `импорт → назначение → прохождение → отчёт`. Миграции и серверный сценарий проверены локально в Supabase на чистой базе.
 
-## Этап 3 — надёжность попытки и события (реализован, ожидает интеграционной проверки с Docker)
+## Этап 3 — надёжность попытки и события (завершён и проверен с Docker)
 
 1. Очередь автосохранения с revision, retry/backoff и состояниями UI.
 2. Восстановление после reload/offline и разрешение конфликтов вкладок.
@@ -31,9 +31,9 @@
 5. Разрешённые browser events, batching, дедупликация и интервалы отчёта.
 6. Rate limiting для проверки ссылки и начала.
 
-Проверки этапа: Playwright-сценарии offline/reload/two-tabs/deadline/double-submit, unit-тесты группировки событий.
+Проверки этапа: Playwright-сценарии offline/reload/two-tabs/deadline/double-submit, unit-тесты группировки событий. Локальный Supabase применяет миграции этапа вместе с остальной схемой без ошибок.
 
-## Этап 4 — полировка и эксплуатация
+## Этап 4 — полировка и эксплуатация (завершён)
 
 1. Все loading/empty/error states, доступность и адаптивность.
 2. Подробная статистика тем и приоритеты следующего занятия.
@@ -41,6 +41,8 @@
 4. Security headers, CORS, sanitization и проверка отсутствия секретов в bundle/API/logs.
 5. CI: typecheck, unit, DB tests, Playwright.
 6. README: local setup, env, миграции, deploy без привязки к frontend host и лимиты бесплатных сервисов.
+
+Проверки этапа: typecheck frontend и Edge Functions, 18 unit-тестов, production build, 3 Playwright-сценария, локальный Supabase `db reset`, API smoke-test с CSP-заголовками и `npm run test:db` для SQL/RLS-сценария. DB-проверка также добавлена в GitHub Actions.
 
 ## Definition of Done
 
