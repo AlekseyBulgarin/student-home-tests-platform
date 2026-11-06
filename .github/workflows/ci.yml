@@ -38,3 +38,4 @@ jobs:
       - run: npm ci
       - run: npx supabase start
       - run: npx supabase db reset
+      - run: npm run test:db

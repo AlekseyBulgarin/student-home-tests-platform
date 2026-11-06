@@ -5,6 +5,7 @@ dist/
 !.env.example
 .supabase/
 supabase/.temp/
+supabase/.branches/
 coverage/
 playwright-report/
 test-results/
