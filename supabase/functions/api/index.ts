@@ -19,6 +19,10 @@ function cors(origin: string | null) {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Cross-Origin-Resource-Policy": "same-site",
+    "Content-Security-Policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     Vary: "Origin",
   };
 }
@@ -75,13 +79,14 @@ async function enforceRateLimit(origin: string | null, tokenHash: string, action
 }
 
 async function dashboard(teacher: string) {
-  const [studentsResult, testsResult, assignmentsResult] = await Promise.all([
+  const [profileResult, studentsResult, testsResult, assignmentsResult] = await Promise.all([
+    service.from("teacher_profiles").select("retention_days,review_below,reinforce_below").eq("id", teacher).single(),
     service.from("students").select("id,first_name,last_name,note,created_at").eq("teacher_id", teacher).order("created_at", { ascending: false }),
     service.from("tests").select("id,title,description,created_at,test_versions(id,version_number,status,published_at)").eq("teacher_id", teacher).order("created_at", { ascending: false }),
     service.from("assignments").select("id,student_id,version_id,deadline_at,revoked_at,created_at,attempts(id,status,score_points,max_points,score_percent,submitted_at)").eq("teacher_id", teacher).order("created_at", { ascending: false }),
   ]);
-  for (const result of [studentsResult, testsResult, assignmentsResult]) if (result.error) throw result.error;
-  return { students: studentsResult.data, tests: testsResult.data, assignments: assignmentsResult.data };
+  for (const result of [profileResult, studentsResult, testsResult, assignmentsResult]) if (result.error) throw result.error;
+  return { settings: profileResult.data, students: studentsResult.data, tests: testsResult.data, assignments: assignmentsResult.data };
 }
 
 async function safeAttempt(attemptId: string) {
@@ -182,6 +187,23 @@ Deno.serve(async (req) => {
         const { data, error } = await service.from("students").insert({ teacher_id: teacher, first_name: firstName, last_name: lastName, note: String(payload.note ?? "").slice(0, 1000) }).select().single();
         if (error) throw error;
         return reply(origin, { student: data }, 201);
+      }
+      case "teacher.delete_student": {
+        const teacher = await requireTeacher(req, origin);
+        const { data, error } = await service.rpc("server_delete_student", { p_teacher_id: teacher, p_student_id: String(payload.student_id ?? "") });
+        if (error) throw error;
+        return reply(origin, data);
+      }
+      case "teacher.update_settings": {
+        const teacher = await requireTeacher(req, origin);
+        const { data, error } = await service.rpc("server_update_teacher_settings", {
+          p_teacher_id: teacher,
+          p_retention_days: Number(payload.retention_days),
+          p_review_below: Number(payload.review_below),
+          p_reinforce_below: Number(payload.reinforce_below),
+        });
+        if (error) throw error;
+        return reply(origin, data);
       }
       case "teacher.import_test": {
         const teacher = await requireTeacher(req, origin);

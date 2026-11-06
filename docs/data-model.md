@@ -122,7 +122,7 @@
 
 ### `audit_log`
 
-- `id`, `teacher_id`, `actor_type`, `actor_id`;
+- `id`, `teacher_id`, `actor_type`;
 - `action`, `entity_type`, `entity_id`;
 - безопасные метаданные без токенов и ответов;
 - `created_at`.

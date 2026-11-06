@@ -3,7 +3,12 @@ export type Version = { id: string; version_number: number; status: "draft" | "p
 export type Test = { id: string; title: string; description: string; created_at: string; test_versions: Version[] };
 export type AttemptSummary = { id: string; status: string; score_points: number | null; max_points: number | null; score_percent: number | null; submitted_at: string | null };
 export type Assignment = { id: string; student_id: string; version_id: string; deadline_at: string; revoked_at: string | null; attempts: AttemptSummary[] };
-export type Dashboard = { students: Student[]; tests: Test[]; assignments: Assignment[] };
+export type Dashboard = {
+  settings: { retention_days: number; review_below: number; reinforce_below: number };
+  students: Student[];
+  tests: Test[];
+  assignments: Assignment[];
+};
 
 export type SafeQuestion = {
   id: string; stable_id: string; type: "single_choice" | "multiple_choice"; text: string;
