@@ -1,5 +1,13 @@
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
-import { importedTestSchema, formatZodIssues } from "../_shared/schema.ts";
+import {
+  attemptActionSchema,
+  extendAttemptSchema,
+  extendTestAttemptsSchema,
+  formatZodIssues,
+  gradeScaleSchema,
+  importedTestSchema,
+  operationFiltersSchema,
+} from "../_shared/schema.ts";
 import { groupTelemetryEvents } from "../_shared/domain.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -12,6 +20,14 @@ const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "http://127.0.0.1:51
 const service = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
 type Json = Record<string, unknown>;
+type OperationStatus = "not_started" | "in_progress" | "submitted" | "expired";
+
+const DEFAULT_GRADE_THRESHOLDS = [
+  { label: "5", min_percent: 85 },
+  { label: "4", min_percent: 70 },
+  { label: "3", min_percent: 50 },
+  { label: "2", min_percent: 0 },
+];
 
 function cors(origin: string | null) {
   const allowed = origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
@@ -81,15 +97,85 @@ async function enforceRateLimit(origin: string | null, tokenHash: string, action
   if (!result?.allowed) throw fail(origin, "rate_limited", "Слишком много запросов. Повторите позже.", 429, { retry_after_seconds: result?.retry_after_seconds ?? 60 });
 }
 
-async function dashboard(teacher: string) {
-  const [profileResult, studentsResult, testsResult, assignmentsResult] = await Promise.all([
+function csvCell(value: unknown) {
+  const text = String(value ?? "");
+  // Spreadsheet applications may evaluate cells starting with these characters.
+  const neutralized = /^[=+\-@]/.test(text) ? `'${text}` : text;
+  return `"${neutralized.replaceAll('"', '""')}"`;
+}
+
+function asOperationRows(assignments: any[], questionCounts: Map<string, number>) {
+  return assignments.map((assignment) => {
+    const attempt = assignment.attempts?.[0];
+    const status: OperationStatus = attempt?.status ?? "not_started";
+    return {
+      assignment_id: assignment.id,
+      attempt_id: attempt?.id ?? null,
+      student_id: assignment.student_id,
+      student_name: [assignment.students?.last_name, assignment.students?.first_name].filter(Boolean).join(" "),
+      version_id: assignment.version_id,
+      test_title: assignment.test_versions?.title_snapshot ?? "Тест",
+      version_number: assignment.test_versions?.version_number ?? 0,
+      status,
+      answers_count: attempt?.attempt_answers?.length ?? 0,
+      questions_count: questionCounts.get(assignment.version_id) ?? 0,
+      score_points: attempt?.score_points ?? null,
+      max_points: attempt?.max_points ?? null,
+      score_percent: attempt?.score_percent ?? null,
+      grade_label: attempt?.grade_label ?? null,
+      completion_reason: attempt?.completion_reason ?? null,
+      telemetry_count: attempt?.attempt_events?.length ?? 0,
+      deadline_at: attempt?.deadline_at_snapshot ?? assignment.deadline_at,
+      submitted_at: attempt?.submitted_at ?? null,
+    };
+  });
+}
+
+function filterOperationRows(rows: ReturnType<typeof asOperationRows>, filters: { search: string; test_version_id?: string; status?: OperationStatus }) {
+  const search = filters.search.toLocaleLowerCase("ru");
+  return rows.filter((row) => {
+    if (filters.test_version_id && row.version_id !== filters.test_version_id) return false;
+    if (filters.status && row.status !== filters.status) return false;
+    return !search || `${row.student_name} ${row.test_title}`.toLocaleLowerCase("ru").includes(search);
+  });
+}
+
+async function operationalData(teacher: string) {
+  const { error: expiryError } = await service.rpc("server_refresh_teacher_attempt_expiry", { p_teacher_id: teacher });
+  if (expiryError) throw expiryError;
+  const [profileResult, scaleResult, studentsResult, testsResult, assignmentsResult] = await Promise.all([
     service.from("teacher_profiles").select("retention_days,review_below,reinforce_below").eq("id", teacher).single(),
+    service.from("teacher_grade_scales").select("thresholds,updated_at").eq("teacher_id", teacher).maybeSingle(),
     service.from("students").select("id,first_name,last_name,note,created_at").eq("teacher_id", teacher).order("created_at", { ascending: false }),
-    service.from("tests").select("id,title,description,created_at,test_versions(id,version_number,status,published_at)").eq("teacher_id", teacher).order("created_at", { ascending: false }),
-    service.from("assignments").select("id,student_id,version_id,deadline_at,revoked_at,created_at,attempts(id,status,score_points,max_points,score_percent,submitted_at)").eq("teacher_id", teacher).order("created_at", { ascending: false }),
+    service.from("tests").select("id,title,description,created_at,test_versions(id,version_number,status,published_at,title_snapshot)").eq("teacher_id", teacher).order("created_at", { ascending: false }),
+    service.from("assignments").select("id,student_id,version_id,deadline_at,revoked_at,created_at,students(first_name,last_name),test_versions(version_number,title_snapshot),attempts(id,status,deadline_at_snapshot,score_points,max_points,score_percent,grade_label,completion_reason,submitted_at,attempt_answers(question_id),attempt_events(id))").eq("teacher_id", teacher).order("created_at", { ascending: false }),
   ]);
-  for (const result of [profileResult, studentsResult, testsResult, assignmentsResult]) if (result.error) throw result.error;
-  return { settings: profileResult.data, students: studentsResult.data, tests: testsResult.data, assignments: assignmentsResult.data };
+  for (const result of [profileResult, scaleResult, studentsResult, testsResult, assignmentsResult]) if (result.error) throw result.error;
+  const versionIds = [...new Set((assignmentsResult.data ?? []).map((assignment) => assignment.version_id))];
+  const questionsResult = versionIds.length
+    ? await service.from("questions").select("version_id").in("version_id", versionIds)
+    : { data: [], error: null };
+  if (questionsResult.error) throw questionsResult.error;
+  const questionCounts = new Map<string, number>();
+  for (const question of questionsResult.data ?? []) questionCounts.set(question.version_id, (questionCounts.get(question.version_id) ?? 0) + 1);
+  return {
+    settings: profileResult.data,
+    grade_scale: scaleResult.data ?? { thresholds: DEFAULT_GRADE_THRESHOLDS, updated_at: null },
+    students: studentsResult.data,
+    tests: testsResult.data,
+    assignments: assignmentsResult.data,
+    operation_rows: asOperationRows(assignmentsResult.data ?? [], questionCounts),
+  };
+}
+
+async function dashboard(teacher: string) {
+  return operationalData(teacher);
+}
+
+function parseAction<T>(origin: string | null, schema: { safeParse(value: unknown): { success: true; data: T } | { success: false; error: any } }, payload: unknown): T {
+  const parsed = schema.safeParse(payload);
+  if (!parsed.success) throw fail(origin, "invalid_payload", "Проверьте введённые данные", 422, formatZodIssues(parsed.error));
+  return parsed.data;
 }
 
 async function safeAttempt(attemptId: string) {
@@ -125,7 +211,7 @@ async function safeAttempt(attemptId: string) {
 
 async function buildReport(attemptId: string, reveal: boolean, includeEvents = false) {
   const { data: attempt, error } = await service.from("attempts")
-    .select("id,status,started_at,submitted_at,duration_seconds,score_points,max_points,score_percent,version_id,assignment_id")
+    .select("id,status,completion_reason,grade_label,started_at,submitted_at,duration_seconds,score_points,max_points,score_percent,version_id,assignment_id")
     .eq("id", attemptId).single();
   if (error) throw error;
   if (!reveal) return { revealed: false, attempt };
@@ -181,6 +267,58 @@ Deno.serve(async (req) => {
       case "teacher.dashboard": {
         const teacher = await requireTeacher(req, origin);
         return reply(origin, await dashboard(teacher));
+      }
+      case "teacher.export_attempts": {
+        const teacher = await requireTeacher(req, origin);
+        const filters = parseAction(origin, operationFiltersSchema, payload);
+        const data = await operationalData(teacher);
+        const rows = filterOperationRows(data.operation_rows, filters);
+        const header = ["Ученик", "Тест", "Версия", "Статус", "Ответы", "Баллы", "Процент", "Оценка", "Причина завершения", "Телеметрия", "Дедлайн"];
+        const csv = [header, ...rows.map((row) => [
+          row.student_name, row.test_title, `v${row.version_number}`, row.status,
+          `${row.answers_count}/${row.questions_count}`, row.score_points == null ? "" : `${row.score_points}/${row.max_points}`,
+          row.score_percent ?? "", row.grade_label ?? "", row.completion_reason ?? "", row.telemetry_count, row.deadline_at,
+        ])].map((line) => line.map(csvCell).join(",")).join("\r\n");
+        const { error } = await service.from("audit_log").insert({
+          teacher_id: teacher, actor_type: "teacher", action: "attempts_csv_exported", entity_type: "attempt_export", metadata: { row_count: rows.length },
+        });
+        if (error) throw error;
+        return reply(origin, { csv });
+      }
+      case "teacher.extend_attempt": {
+        const teacher = await requireTeacher(req, origin);
+        const dto = parseAction(origin, extendAttemptSchema, payload);
+        const { data, error } = await service.rpc("server_extend_teacher_attempt", { p_teacher_id: teacher, p_attempt_id: dto.attempt_id, p_deadline_at: dto.deadline_at });
+        if (error) throw error;
+        return reply(origin, data);
+      }
+      case "teacher.extend_test_attempts": {
+        const teacher = await requireTeacher(req, origin);
+        const dto = parseAction(origin, extendTestAttemptsSchema, payload);
+        const { data, error } = await service.rpc("server_extend_teacher_test_attempts", { p_teacher_id: teacher, p_version_id: dto.version_id, p_deadline_at: dto.deadline_at });
+        if (error) throw error;
+        return reply(origin, data);
+      }
+      case "teacher.force_finish_attempt": {
+        const teacher = await requireTeacher(req, origin);
+        const dto = parseAction(origin, attemptActionSchema, payload);
+        const { data, error } = await service.rpc("server_force_finish_teacher_attempt", { p_teacher_id: teacher, p_attempt_id: dto.attempt_id });
+        if (error) throw error;
+        return reply(origin, data);
+      }
+      case "teacher.regrade_attempt": {
+        const teacher = await requireTeacher(req, origin);
+        const dto = parseAction(origin, attemptActionSchema, payload);
+        const { data, error } = await service.rpc("server_regrade_teacher_attempt", { p_teacher_id: teacher, p_attempt_id: dto.attempt_id });
+        if (error) throw error;
+        return reply(origin, data);
+      }
+      case "teacher.update_grade_scale": {
+        const teacher = await requireTeacher(req, origin);
+        const dto = parseAction(origin, gradeScaleSchema, payload);
+        const { data, error } = await service.rpc("server_update_grade_scale", { p_teacher_id: teacher, p_thresholds: dto.thresholds });
+        if (error) throw error;
+        return reply(origin, data);
       }
       case "teacher.create_student": {
         const teacher = await requireTeacher(req, origin);

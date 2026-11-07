@@ -39,6 +39,23 @@ export function topicStatus(percentage: number, reviewBelow = 60, reinforceBelow
   return "successful" as const;
 }
 
+export type GradeThreshold = { label: string; min_percent: number };
+
+export function validGradeThresholds(thresholds: GradeThreshold[]) {
+  if (thresholds.length < 2 || thresholds.length > 10 || thresholds.at(-1)?.min_percent !== 0) return false;
+  const labels = new Set<string>();
+  return thresholds.every((threshold, index) => {
+    if (!threshold.label.trim() || threshold.label.length > 20 || threshold.min_percent < 0 || threshold.min_percent > 100 || labels.has(threshold.label)) return false;
+    labels.add(threshold.label);
+    return index === 0 || threshold.min_percent < thresholds[index - 1].min_percent;
+  });
+}
+
+export function gradeLabelForPercent(thresholds: GradeThreshold[], percentage: number) {
+  if (!validGradeThresholds(thresholds)) throw new Error("invalid_grade_scale");
+  return thresholds.find((threshold) => percentage >= threshold.min_percent)?.label ?? thresholds.at(-1)!.label;
+}
+
 export type TelemetryEvent = {
   type: string;
   client_occurred_at: string;

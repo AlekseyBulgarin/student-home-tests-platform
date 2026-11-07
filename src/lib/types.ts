@@ -1,13 +1,23 @@
 export type Student = { id: string; first_name: string; last_name: string; note: string | null; created_at: string };
-export type Version = { id: string; version_number: number; status: "draft" | "published"; published_at: string | null };
+export type Version = { id: string; version_number: number; status: "draft" | "published"; published_at: string | null; title_snapshot?: string };
 export type Test = { id: string; title: string; description: string; created_at: string; test_versions: Version[] };
-export type AttemptSummary = { id: string; status: string; score_points: number | null; max_points: number | null; score_percent: number | null; submitted_at: string | null };
+export type AttemptSummary = { id: string; status: string; deadline_at_snapshot?: string; score_points: number | null; max_points: number | null; score_percent: number | null; grade_label?: string | null; completion_reason?: "student" | "teacher" | "deadline" | null; submitted_at: string | null; attempt_answers?: Array<{ question_id: string }>; attempt_events?: Array<{ id: string }> };
 export type Assignment = { id: string; student_id: string; version_id: string; deadline_at: string; revoked_at: string | null; attempts: AttemptSummary[] };
+export type OperationRow = {
+  assignment_id: string; attempt_id: string | null; student_id: string; student_name: string;
+  version_id: string; test_title: string; version_number: number;
+  status: "not_started" | "in_progress" | "submitted" | "expired";
+  answers_count: number; questions_count: number; score_points: number | null; max_points: number | null;
+  score_percent: number | null; grade_label: string | null; completion_reason: "student" | "teacher" | "deadline" | null;
+  telemetry_count: number; deadline_at: string; submitted_at: string | null;
+};
 export type Dashboard = {
   settings: { retention_days: number; review_below: number; reinforce_below: number };
+  grade_scale: { thresholds: Array<{ label: string; min_percent: number }>; updated_at: string | null };
   students: Student[];
   tests: Test[];
   assignments: Assignment[];
+  operation_rows: OperationRow[];
 };
 
 export type SafeQuestion = {
@@ -22,7 +32,7 @@ export type AttemptState = {
 
 export type Report = {
   revealed: boolean;
-  attempt: { id: string; status: string; started_at: string; submitted_at: string | null; duration_seconds: number | null; score_points: number; max_points: number; score_percent: number };
+  attempt: { id: string; status: string; completion_reason?: "student" | "teacher" | "deadline" | null; grade_label?: string | null; started_at: string; submitted_at: string | null; duration_seconds: number | null; score_points: number; max_points: number; score_percent: number };
   items?: Array<{ question_id: string; stable_id: string; text: string; selected: Array<{ id: string; text: string }>; correct: Array<{ id: string; text: string }>; explanation: string; earned_points: number; max_points: number; is_correct: boolean }>;
   topics?: Array<{ id: string; name: string; earned: number; max: number; count: number; percentage: number; status: "review" | "reinforce" | "successful"; limited_evidence: boolean }>;
   event_intervals?: Array<{ started_at: string; ended_at: string; types: string[]; summary: string }>;

@@ -55,3 +55,46 @@ export const importedTestSchema = z.object({
 export function formatZodIssues(error: z.ZodError) {
   return error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code, message: issue.message }));
 }
+
+const uuid = z.uuid();
+const isoDateTime = z.iso.datetime({ offset: true });
+
+export const operationFiltersSchema = z.object({
+  search: z.string().trim().max(200).optional().default(""),
+  test_version_id: uuid.optional(),
+  status: z.enum(["not_started", "in_progress", "submitted", "expired"]).optional(),
+}).strict();
+
+export const extendAttemptSchema = z.object({
+  attempt_id: uuid,
+  deadline_at: isoDateTime,
+}).strict();
+
+export const extendTestAttemptsSchema = z.object({
+  version_id: uuid,
+  deadline_at: isoDateTime,
+}).strict();
+
+export const attemptActionSchema = z.object({ attempt_id: uuid }).strict();
+
+const gradeThresholdSchema = z.object({
+  label: z.string().trim().min(1).max(20),
+  min_percent: z.number().finite().min(0).max(100),
+}).strict();
+
+export const gradeScaleSchema = z.object({
+  thresholds: z.array(gradeThresholdSchema).min(2).max(10),
+}).strict().superRefine(({ thresholds }, ctx) => {
+  const labels = new Set<string>();
+  for (let index = 0; index < thresholds.length; index += 1) {
+    const threshold = thresholds[index];
+    if (labels.has(threshold.label)) ctx.addIssue({ code: "custom", path: ["thresholds", index, "label"], message: "Названия оценок не должны повторяться" });
+    labels.add(threshold.label);
+    if (index > 0 && threshold.min_percent >= thresholds[index - 1].min_percent) {
+      ctx.addIssue({ code: "custom", path: ["thresholds", index, "min_percent"], message: "Пороги должны строго убывать" });
+    }
+  }
+  if (thresholds.at(-1)?.min_percent !== 0) {
+    ctx.addIssue({ code: "custom", path: ["thresholds", thresholds.length - 1, "min_percent"], message: "Последний порог должен быть 0" });
+  }
+});

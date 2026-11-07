@@ -1,11 +1,11 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Navigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, BookOpenCheck, CheckCircle2, Clipboard, FileJson, LoaderCircle, Plus, Send, Settings, Trash2, Users } from "lucide-react";
+import { AlertCircle, BarChart3, BookOpenCheck, CalendarClock, CheckCircle2, Clipboard, Download, FileJson, LoaderCircle, Plus, RefreshCcw, Send, Settings, Trash2, Users } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { parseImport, type ImportTest } from "@/lib/test-schema";
-import type { Dashboard, Report } from "@/lib/types";
+import type { Dashboard, OperationRow, Report } from "@/lib/types";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/providers/auth-provider";
 import { AppShell } from "@/components/app-shell";
@@ -27,6 +27,15 @@ import { Textarea } from "@/components/ui/textarea";
 
 function ErrorAlert({ error }: { error: unknown }) {
   return <Alert variant="destructive"><AlertCircle /><AlertTitle>Не удалось выполнить операцию</AlertTitle><AlertDescription>{error instanceof Error ? error.message : "Повторите позже"}</AlertDescription></Alert>;
+}
+
+const statusLabels: Record<OperationRow["status"], string> = { not_started: "Не начата", in_progress: "Активна", submitted: "Завершена", expired: "Просрочена" };
+const completionLabels: Record<NonNullable<OperationRow["completion_reason"]>, string> = { student: "ученик", teacher: "преподаватель", deadline: "дедлайн" };
+
+function localDateTime(value: string) {
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
 }
 
 function StudentsPanel({ data }: { data: Dashboard }) {
@@ -61,6 +70,13 @@ function SettingsPanel({ data }: { data: Dashboard }) {
   </FieldGroup></CardContent><CardFooter><Button type="submit" disabled={mutation.isPending}>{mutation.isPending ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : <Settings data-icon="inline-start" />}Сохранить настройки</Button></CardFooter></form></Card>;
 }
 
+function GradeScalePanel({ data }: { data: Dashboard }) {
+  const client = useQueryClient(); const [thresholds, setThresholds] = useState(data.grade_scale.thresholds);
+  const mutation = useMutation({ mutationFn: () => api("teacher.update_grade_scale", { thresholds }, true), onSuccess: async () => { await client.invalidateQueries({ queryKey: ["dashboard"] }); toast.success("Шкала сохранена для новых результатов"); } });
+  const update = (index: number, key: "label" | "min_percent", value: string) => setThresholds((current) => current.map((threshold, position) => position === index ? { ...threshold, [key]: key === "min_percent" ? Number(value) : value } : threshold));
+  return <Card className="max-w-2xl"><CardHeader><CardTitle>Шкала оценок</CardTitle><CardDescription>Пороги идут от высокого к низкому, последний должен быть 0%. Новая шкала применяется только к будущим оцениваниям и явному пересчёту.</CardDescription></CardHeader><CardContent className="flex flex-col gap-3">{thresholds.map((threshold, index) => <div key={`${index}-${threshold.label}`} className="grid grid-cols-[1fr_120px_auto] gap-2"><Input value={threshold.label} onChange={(event) => update(index, "label", event.target.value)} aria-label={`Оценка ${index + 1}`} /><Input type="number" min="0" max="100" value={threshold.min_percent} onChange={(event) => update(index, "min_percent", event.target.value)} aria-label={`Порог ${index + 1}`} /><Button variant="ghost" size="sm" disabled={thresholds.length <= 2} onClick={() => setThresholds((current) => current.filter((_, position) => position !== index))}><Trash2 />Удалить</Button></div>)}<div><Button variant="outline" size="sm" disabled={thresholds.length >= 10} onClick={() => setThresholds((current) => [...current, { label: "Новая", min_percent: 0 }])}><Plus data-icon="inline-start" />Добавить порог</Button></div>{mutation.error ? <ErrorAlert error={mutation.error} /> : null}</CardContent><CardFooter><Button disabled={mutation.isPending} onClick={() => mutation.mutate()}>{mutation.isPending ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : <Settings data-icon="inline-start" />}Сохранить шкалу</Button></CardFooter></Card>;
+}
+
 function TestsPanel({ data }: { data: Dashboard }) {
   const client = useQueryClient(); const [json, setJson] = useState(""); const preview = useMemo(() => json.trim() ? parseImport(json) : null, [json]);
   const importMutation = useMutation({ mutationFn: (test: ImportTest) => api("teacher.import_test", { test }, true), onSuccess: async () => { setJson(""); await client.invalidateQueries({ queryKey: ["dashboard"] }); toast.success("Черновик импортирован"); } });
@@ -92,6 +108,65 @@ function AssignPanel({ data }: { data: Dashboard }) {
   <Card><CardHeader><CardTitle>Персональная ссылка</CardTitle><CardDescription>Передайте её только назначенному ученику.</CardDescription></CardHeader><CardContent>{link ? <div className="flex flex-col gap-3"><Input value={link} readOnly aria-label="Персональная ссылка" /><Button variant="outline" onClick={async () => { await navigator.clipboard.writeText(link); toast.success("Ссылка скопирована"); }}><Clipboard data-icon="inline-start" />Скопировать</Button></div> : <Empty><EmptyHeader><EmptyMedia variant="icon"><Send /></EmptyMedia><EmptyTitle>Ссылка ещё не создана</EmptyTitle><EmptyDescription>Заполните форму назначения.</EmptyDescription></EmptyHeader></Empty>}</CardContent></Card></div>;
 }
 
+type PendingOperation =
+  | { kind: "extend"; row: OperationRow }
+  | { kind: "bulk" }
+  | { kind: "force"; row: OperationRow }
+  | { kind: "regrade"; row: OperationRow };
+
+function OperationsPanel({ data }: { data: Dashboard }) {
+  const client = useQueryClient();
+  const [search, setSearch] = useState(""); const [status, setStatus] = useState("all"); const [versionId, setVersionId] = useState("all");
+  const [deadline, setDeadline] = useState(localDateTime(new Date(Date.now() + 86_400_000).toISOString()));
+  const [pending, setPending] = useState<PendingOperation | null>(null);
+  const [report, setReport] = useState<Report | null>(null); const [reportOpen, setReportOpen] = useState(false); const [reportError, setReportError] = useState<unknown>();
+  const filters = { search, ...(status !== "all" ? { status } : {}), ...(versionId !== "all" ? { test_version_id: versionId } : {}) };
+  const rows = useMemo(() => data.operation_rows.filter((row) => {
+    const query = search.trim().toLocaleLowerCase("ru");
+    return (!query || `${row.student_name} ${row.test_title}`.toLocaleLowerCase("ru").includes(query))
+      && (status === "all" || row.status === status) && (versionId === "all" || row.version_id === versionId);
+  }), [data.operation_rows, search, status, versionId]);
+  const published = data.tests.flatMap((test) => test.test_versions.filter((version) => version.status === "published").map((version) => ({ ...version, title: test.title })));
+  const mutation = useMutation({
+    mutationFn: ({ action, payload }: { action: string; payload: Record<string, unknown> }) => api(action, payload, true),
+    onSuccess: async () => { setPending(null); await client.invalidateQueries({ queryKey: ["dashboard"] }); toast.success("Операция выполнена и записана в аудит"); },
+  });
+  const exportMutation = useMutation({
+    mutationFn: () => api<{ csv: string }>("teacher.export_attempts", filters, true),
+    onSuccess: ({ csv }) => {
+      const file = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }); const url = URL.createObjectURL(file);
+      const anchor = document.createElement("a"); anchor.href = url; anchor.download = "попытки-тестов.csv"; anchor.click(); URL.revokeObjectURL(url);
+      toast.success("CSV сформирован только по вашим текущим данным");
+    },
+  });
+  const run = () => {
+    if (!pending) return;
+    if (pending.kind === "extend") mutation.mutate({ action: "teacher.extend_attempt", payload: { attempt_id: pending.row.attempt_id, deadline_at: new Date(deadline).toISOString() } });
+    if (pending.kind === "bulk") mutation.mutate({ action: "teacher.extend_test_attempts", payload: { version_id: versionId, deadline_at: new Date(deadline).toISOString() } });
+    if (pending.kind === "force") mutation.mutate({ action: "teacher.force_finish_attempt", payload: { attempt_id: pending.row.attempt_id } });
+    if (pending.kind === "regrade") mutation.mutate({ action: "teacher.regrade_attempt", payload: { attempt_id: pending.row.attempt_id } });
+  };
+  const loadReport = async (attemptId: string) => { try { setReport(null); setReportError(undefined); setReportOpen(true); setReport(await api<Report>("teacher.report", { attempt_id: attemptId }, true)); } catch (error) { setReportError(error); } };
+  const actionDescription = pending?.kind === "extend" ? "Дедлайн активной попытки будет продлён. Изменение доступно только владельцу попытки."
+    : pending?.kind === "bulk" ? "Дедлайны всех активных попыток выбранной версии будут продлены. Завершённые и просроченные попытки не изменятся."
+      : pending?.kind === "force" ? "Попытка будет немедленно завершена с причиной «преподаватель» и оценена сервером. Ответы ученика не изменятся."
+        : "Сервер заново посчитает уже сохранённые ответы. Оценка будет пересчитана по текущей шкале, ответы не изменятся.";
+  return <div className="flex flex-col gap-6">
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{published.map((version) => {
+      const summary = data.operation_rows.filter((row) => row.version_id === version.id); const complete = summary.filter((row) => row.status === "submitted" && row.score_percent != null);
+      const average = complete.length ? Math.round((complete.reduce((sum, row) => sum + Number(row.score_percent), 0) / complete.length) * 100) / 100 : null;
+      return <Card key={version.id}><CardHeader><CardDescription>{version.title} · v{version.version_number}</CardDescription><CardTitle className="text-lg">{summary.length} назначений</CardTitle></CardHeader><CardContent className="grid grid-cols-2 gap-2 text-sm"><span>Не начаты: {summary.filter((row) => row.status === "not_started").length}</span><span>Активны: {summary.filter((row) => row.status === "in_progress").length}</span><span>Завершены: {complete.length}</span><span>Просрочены: {summary.filter((row) => row.status === "expired").length}</span><span className="col-span-2 font-medium">Средний результат: {average == null ? "—" : `${average}%`}</span></CardContent></Card>;
+    })}</div>
+    <Card><CardHeader><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle className="flex items-center gap-2"><BarChart3 />Операционная панель</CardTitle><CardDescription>События телеметрии показаны отдельно и не влияют на учебную оценку.</CardDescription></div><Button variant="outline" onClick={() => exportMutation.mutate()} disabled={exportMutation.isPending}><Download data-icon="inline-start" />CSV текущей выборки</Button></div></CardHeader><CardContent className="flex flex-col gap-4">
+      <div className="grid gap-3 md:grid-cols-4"><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Поиск ученика или теста" aria-label="Поиск попыток" /><Select value={status} onValueChange={(value) => setStatus(value as string)}><SelectTrigger><SelectValue placeholder="Статус" /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="all">Все статусы</SelectItem>{Object.entries(statusLabels).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectGroup></SelectContent></Select><Select value={versionId} onValueChange={(value) => setVersionId(value as string)}><SelectTrigger><SelectValue placeholder="Тест" /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="all">Все тесты</SelectItem>{published.map((version) => <SelectItem key={version.id} value={version.id}>{version.title} · v{version.version_number}</SelectItem>)}</SelectGroup></SelectContent></Select><Input type="datetime-local" value={deadline} onChange={(event) => setDeadline(event.target.value)} aria-label="Новый дедлайн" /></div>
+      <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={versionId === "all" || !deadline} onClick={() => setPending({ kind: "bulk" })}><CalendarClock data-icon="inline-start" />Продлить активные выбранного теста</Button>{mutation.error ? <ErrorAlert error={mutation.error} /> : null}{exportMutation.error ? <ErrorAlert error={exportMutation.error} /> : null}</div>
+      {rows.length ? <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Ученик / тест</TableHead><TableHead>Статус и прогресс</TableHead><TableHead>Результат</TableHead><TableHead>Завершение</TableHead><TableHead>Телеметрия</TableHead><TableHead>Дедлайн</TableHead><TableHead className="text-right">Действия</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => <TableRow key={row.assignment_id}><TableCell><div className="flex flex-col"><span className="font-medium">{row.student_name}</span><span className="text-xs text-muted-foreground">{row.test_title} · v{row.version_number}</span></div></TableCell><TableCell><Badge variant="secondary">{statusLabels[row.status]}</Badge><p className="mt-1 text-xs text-muted-foreground">{row.answers_count}/{row.questions_count} ответов</p></TableCell><TableCell>{row.score_percent == null ? "—" : <>{row.score_points}/{row.max_points} · {row.score_percent}%<p className="text-xs text-muted-foreground">Оценка: {row.grade_label ?? "—"}</p></>}</TableCell><TableCell>{row.completion_reason ? completionLabels[row.completion_reason] : "—"}</TableCell><TableCell>{row.telemetry_count ? `${row.telemetry_count} событий` : "Нет"}</TableCell><TableCell>{new Date(row.deadline_at).toLocaleString("ru-RU")}</TableCell><TableCell className="text-right"><div className="flex justify-end gap-1">{row.attempt_id ? <Button size="sm" variant="outline" onClick={() => void loadReport(row.attempt_id!)}>Отчёт</Button> : null}{row.status === "in_progress" && row.attempt_id ? <><Button size="sm" variant="outline" onClick={() => setPending({ kind: "extend", row })}>Продлить</Button><Button size="sm" variant="destructive" onClick={() => setPending({ kind: "force", row })}>Завершить</Button></> : null}{row.status === "submitted" && row.attempt_id ? <Button size="sm" variant="outline" onClick={() => setPending({ kind: "regrade", row })}><RefreshCcw />Пересчитать</Button> : null}</div></TableCell></TableRow>)}</TableBody></Table></div> : <Empty><EmptyHeader><EmptyMedia variant="icon"><BarChart3 /></EmptyMedia><EmptyTitle>В выборке нет попыток</EmptyTitle><EmptyDescription>Измените поиск или фильтры.</EmptyDescription></EmptyHeader></Empty>}
+    </CardContent></Card>
+    <AlertDialog open={Boolean(pending)} onOpenChange={(open) => { if (!open && !mutation.isPending) setPending(null); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Подтвердить действие?</AlertDialogTitle><AlertDialogDescription>{actionDescription}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={mutation.isPending}>Отмена</AlertDialogCancel><AlertDialogAction disabled={mutation.isPending} onClick={run}>{mutation.isPending ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : null}Подтвердить</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+    <Dialog open={reportOpen} onOpenChange={setReportOpen}><DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>Подробный отчёт</DialogTitle><DialogDescription>Серверный результат и отдельный журнал телеметрии.</DialogDescription></DialogHeader>{reportError ? <ErrorAlert error={reportError} /> : report ? <ReportView report={report} /> : <Skeleton className="h-48" />}</DialogContent></Dialog>
+  </div>;
+}
+
 function ResultsPanel({ data }: { data: Dashboard }) {
   const [report, setReport] = useState<Report | null>(null); const [open, setOpen] = useState(false); const [error, setError] = useState<unknown>();
   const studentMap = new Map(data.students.map((student) => [student.id, `${student.last_name} ${student.first_name}`]));
@@ -106,6 +181,6 @@ export function TeacherDashboard() {
   if (!loading && !session) return <Navigate to="/teacher/login" replace />;
   return <AppShell onSignOut={() => void supabase!.auth.signOut()}><div className="flex flex-col gap-6"><div><h1 className="text-3xl font-semibold tracking-tight">Кабинет преподавателя</h1><p className="text-muted-foreground">Импортируйте тест, опубликуйте версию и назначьте её ученику.</p></div>
     {query.error ? <ErrorAlert error={query.error} /> : null}
-    {query.isLoading || !query.data ? <div className="grid gap-4 md:grid-cols-3"><Skeleton className="h-28" /><Skeleton className="h-28" /><Skeleton className="h-28" /></div> : <Tabs defaultValue="students"><TabsList className="w-full justify-start overflow-x-auto"><TabsTrigger value="students"><Users />Ученики</TabsTrigger><TabsTrigger value="tests"><FileJson />Тесты</TabsTrigger><TabsTrigger value="assign"><Send />Назначить</TabsTrigger><TabsTrigger value="results"><BookOpenCheck />Результаты</TabsTrigger><TabsTrigger value="settings"><Settings />Настройки</TabsTrigger></TabsList><TabsContent value="students"><StudentsPanel data={query.data} /></TabsContent><TabsContent value="tests"><TestsPanel data={query.data} /></TabsContent><TabsContent value="assign"><AssignPanel data={query.data} /></TabsContent><TabsContent value="results"><ResultsPanel data={query.data} /></TabsContent><TabsContent value="settings"><SettingsPanel data={query.data} /></TabsContent></Tabs>}
+    {query.isLoading || !query.data ? <div className="grid gap-4 md:grid-cols-3"><Skeleton className="h-28" /><Skeleton className="h-28" /><Skeleton className="h-28" /></div> : <Tabs defaultValue="operations"><TabsList className="w-full justify-start overflow-x-auto"><TabsTrigger value="operations"><BarChart3 />Панель</TabsTrigger><TabsTrigger value="students"><Users />Ученики</TabsTrigger><TabsTrigger value="tests"><FileJson />Тесты</TabsTrigger><TabsTrigger value="assign"><Send />Назначить</TabsTrigger><TabsTrigger value="results"><BookOpenCheck />Результаты</TabsTrigger><TabsTrigger value="settings"><Settings />Настройки</TabsTrigger></TabsList><TabsContent value="operations"><OperationsPanel data={query.data} /></TabsContent><TabsContent value="students"><StudentsPanel data={query.data} /></TabsContent><TabsContent value="tests"><TestsPanel data={query.data} /></TabsContent><TabsContent value="assign"><AssignPanel data={query.data} /></TabsContent><TabsContent value="results"><ResultsPanel data={query.data} /></TabsContent><TabsContent value="settings"><div className="flex flex-col gap-6"><SettingsPanel data={query.data} /><GradeScalePanel data={query.data} /></div></TabsContent></Tabs>}
   </div></AppShell>;
 }
