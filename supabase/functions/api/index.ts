@@ -54,6 +54,14 @@ function fail(origin: string | null, code: string, message: string, status = 400
   return reply(origin, { error: { code, message, details } }, status);
 }
 
+function errorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error && "message" in error && typeof (error as { message?: unknown }).message === "string") {
+    return (error as { message: string }).message;
+  }
+  return "unknown_error";
+}
+
 function randomToken() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
@@ -465,7 +473,7 @@ Deno.serve(async (req) => {
     }
   } catch (error) {
     if (error instanceof Response) return error;
-    const message = error instanceof Error ? error.message : "Неизвестная ошибка";
+    const message = errorMessage(error);
     console.error("api_request_failed", message);
     const safeCode = message.includes("deadline_passed") ? "deadline_passed" : message.includes("attempt_closed") ? "attempt_closed" : "server_error";
     return fail(origin, safeCode, safeCode === "server_error" ? "Сервер не смог выполнить операцию" : "Попытка уже завершена или время истекло", safeCode === "server_error" ? 500 : 409);
