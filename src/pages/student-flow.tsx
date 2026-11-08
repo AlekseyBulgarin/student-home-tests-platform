@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { AlertCircle, CheckCircle2, Clock3, CloudOff, Expand, LoaderCircle, RefreshCw, Save, Send, ShieldCheck, WifiOff } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronLeft, ChevronRight, Clock3, CloudOff, Expand, ListChecks, LoaderCircle, RefreshCw, Save, Send, ShieldCheck, WifiOff } from "lucide-react";
 import { api } from "@/lib/api";
 import type { AttemptState, Report, SafeQuestion } from "@/lib/types";
 import { useAttemptAutosave, type SaveStatus } from "@/hooks/use-attempt-autosave";
@@ -41,9 +41,13 @@ function SaveIndicator({ status, lastSavedAt }: { status: SaveStatus; lastSavedA
 }
 
 function QuestionCard({ question, value, disabled, onChange }: { question: SafeQuestion; value: string[]; disabled: boolean; onChange: (next: string[]) => void }) {
-  return <Card><CardHeader><div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{question.position + 1}</Badge>{question.topics.map((topic) => <Badge key={topic} variant="outline">{topic}</Badge>)}</div><CardTitle className="text-lg leading-relaxed">{question.text}</CardTitle><CardDescription>{question.type === "single_choice" ? "Выберите один вариант" : "Выберите все подходящие варианты"} · {question.points} баллов</CardDescription></CardHeader><CardContent>
+  return <Card><CardHeader><div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{question.position + 1}</Badge>{question.topics.map((topic) => <Badge key={topic} variant="outline">{topic}</Badge>)}</div><CardTitle id={`question-${question.id}`} className="text-lg leading-relaxed">{question.text}</CardTitle><CardDescription>{question.type === "single_choice" ? "Выберите один вариант" : "Выберите все подходящие варианты"} · {question.points} баллов</CardDescription></CardHeader><CardContent>
     {question.type === "single_choice" ? <RadioGroup disabled={disabled} value={value[0] ?? ""} onValueChange={(next) => onChange(next ? [next as string] : [])} className="flex flex-col gap-3">{question.options.map((option) => <Field key={option.id} orientation="horizontal" data-disabled={disabled}><RadioGroupItem id={`${question.id}-${option.id}`} value={option.id} /><FieldLabel htmlFor={`${question.id}-${option.id}`} className="font-normal">{option.text}</FieldLabel></Field>)}</RadioGroup> : <FieldGroup>{question.options.map((option) => { const checked = value.includes(option.id); return <Field key={option.id} orientation="horizontal" data-disabled={disabled}><Checkbox id={`${question.id}-${option.id}`} checked={checked} disabled={disabled} onCheckedChange={(next) => onChange(next ? [...value, option.id] : value.filter((id) => id !== option.id))} /><FieldLabel htmlFor={`${question.id}-${option.id}`} className="font-normal">{option.text}</FieldLabel></Field>; })}</FieldGroup>}
   </CardContent></Card>;
+}
+
+function QuestionNavigator({ questions, answers, activeIndex, onSelect }: { questions: SafeQuestion[]; answers: Record<string, string[]>; activeIndex: number; onSelect: (index: number) => void }) {
+  return <aside className="rounded-xl border bg-card p-3 lg:sticky lg:top-24 lg:self-start" aria-label="Навигация по вопросам"><div className="mb-3 flex items-center gap-2 px-1 text-sm font-medium"><ListChecks aria-hidden="true" />Вопросы</div><div className="grid grid-cols-6 gap-2 lg:grid-cols-1">{questions.map((question, index) => { const answered = (answers[question.id]?.length ?? 0) > 0; const active = index === activeIndex; return <Button key={question.id} type="button" variant={active ? "default" : "outline"} className="justify-center lg:justify-start" aria-current={active ? "step" : undefined} aria-controls={`question-${question.id}`} onClick={() => onSelect(index)}><span className="font-mono">{index + 1}</span><span className="hidden lg:inline">{answered ? "Ответ дан" : "Без ответа"}</span><span className={`ml-auto hidden size-2 rounded-full lg:block ${answered ? "bg-emerald-500" : "bg-muted-foreground/35"}`} aria-label={answered ? "Ответ дан" : "Без ответа"} /></Button>; })}</div></aside>;
 }
 
 export function StudentFlow() {
@@ -55,6 +59,7 @@ export function StudentFlow() {
   const [preview, setPreview] = useState<AssignmentPreview | null>(null);
   const [attempt, setAttempt] = useState<AttemptState | null>(null);
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
+  const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
   const [report, setReport] = useState<Report | null>(null);
   const [firstName, setFirstName] = useState(""); const [lastName, setLastName] = useState("");
   const [loading, setLoading] = useState(true); const [pending, setPending] = useState(false); const [error, setError] = useState("");
@@ -114,6 +119,27 @@ export function StudentFlow() {
 
   const answered = useMemo(() => attempt?.questions.filter((question) => (answers[question.id]?.length ?? 0) > 0).length ?? 0, [answers, attempt]);
 
+  useEffect(() => {
+    const length = attempt?.questions.length ?? 0;
+    setActiveQuestionIndex((current) => Math.min(current, Math.max(0, length - 1)));
+  }, [attempt?.questions.length]);
+
+  useEffect(() => {
+    if (!attempt || attempt.attempt.status !== "in_progress") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, button, [role='radio'], [role='checkbox']")) return;
+      if (event.key === "ArrowLeft") { event.preventDefault(); setActiveQuestionIndex((current) => Math.max(0, current - 1)); }
+      if (event.key === "ArrowRight") { event.preventDefault(); setActiveQuestionIndex((current) => Math.min(attempt.questions.length - 1, current + 1)); }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [attempt]);
+
+  useEffect(() => {
+    questionAreaRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [activeQuestionIndex]);
+
   async function start(event: FormEvent) {
     event.preventDefault(); setPending(true); setError("");
     try {
@@ -145,7 +171,7 @@ export function StudentFlow() {
 
   if (loading) return <AppShell><div className="mx-auto flex max-w-3xl flex-col gap-4"><Skeleton className="h-24" /><Skeleton className="h-64" /></div></AppShell>;
   if (error && !attempt && !preview) return <AppShell><div className="mx-auto max-w-xl"><Alert variant="destructive"><AlertCircle /><AlertTitle>Тест недоступен</AlertTitle><AlertDescription>{error}</AlertDescription></Alert></div></AppShell>;
-  if (report) return <AppShell><div className="mx-auto flex max-w-3xl flex-col gap-6"><div><Badge variant="secondary">Тест завершён</Badge><h1 className="mt-2 text-3xl font-semibold">Ваш результат</h1></div>{report.revealed ? <ReportView report={report} /> : <><div className="grid gap-4 sm:grid-cols-2"><Card><CardHeader><CardDescription>Баллы</CardDescription><CardTitle>{report.attempt.score_points}/{report.attempt.max_points}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>Процент</CardDescription><CardTitle>{report.attempt.score_percent}%</CardTitle></CardHeader></Card></div><Alert><Clock3 /><AlertTitle>Подробный разбор пока закрыт</AlertTitle><AlertDescription>Правильные ответы и объяснения появятся согласно политике преподавателя.</AlertDescription></Alert></>}</div></AppShell>;
+  if (report) return <AppShell><div className="mx-auto flex max-w-3xl flex-col gap-6"><div><Badge variant="secondary">Тест завершён</Badge><h1 className="mt-2 text-3xl font-semibold">Ваш результат</h1></div>{report.revealed ? <ReportView report={report} /> : <><div className="grid gap-4 sm:grid-cols-2"><Card><CardHeader><CardDescription>Баллы</CardDescription><CardTitle>{report.attempt.score_points}/{report.attempt.max_points}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>Процент</CardDescription><CardTitle>{report.attempt.score_percent}%</CardTitle></CardHeader></Card></div><Alert><Clock3 /><AlertTitle>Подробный разбор пока закрыт</AlertTitle><AlertDescription>Цветовая отметка ответов и статистика по темам появятся, когда преподаватель разрешит раскрытие: сразу после отправки, после дедлайна или вручную — в зависимости от назначения.</AlertDescription></Alert></>}</div></AppShell>;
   if (!attempt && preview) return <AppShell><div className="mx-auto flex max-w-2xl flex-col gap-6"><div><Badge variant="secondary">Персональное назначение</Badge><h1 className="mt-2 text-3xl font-semibold">{preview.assignment.title}</h1><p className="text-muted-foreground">Дедлайн: {new Date(preview.assignment.deadline_at).toLocaleString("ru-RU")}</p></div><Card><CardHeader><CardTitle>Перед началом</CardTitle><CardDescription>Проверьте отображаемое имя и ознакомьтесь с правилами.</CardDescription></CardHeader><form onSubmit={start}><CardContent><FieldGroup>
     <Field><FieldLabel htmlFor="first-name">Имя</FieldLabel><Input id="first-name" value={firstName} onChange={(event) => setFirstName(event.target.value)} required maxLength={100} /></Field><Field><FieldLabel htmlFor="last-name">Фамилия</FieldLabel><Input id="last-name" value={lastName} onChange={(event) => setLastName(event.target.value)} required maxLength={100} /></Field>
     <Alert><ShieldCheck /><AlertTitle>Какие события фиксируются</AlertTitle><AlertDescription>Платформа записывает доступные входы и выходы из fullscreen, видимость вкладки, focus/blur, стандартные попытки копирования в области задания и состояние сети. Она не видит системные скриншоты, телефон, другие приложения, историю браузера или содержимое буфера. События неполны, не доказывают списывание и не влияют на балл автоматически.</AlertDescription></Alert>
@@ -161,7 +187,7 @@ export function StudentFlow() {
     {autosave.status === "offline" ? <Alert><WifiOff /><AlertTitle>Нет соединения</AlertTitle><AlertDescription>Не закрывайте вкладку. Изменения будут отправлены после восстановления сети.</AlertDescription></Alert> : null}
     {monitoring.deliveryError ? <Alert><AlertCircle /><AlertTitle>Не все события доставлены</AlertTitle><AlertDescription>Телеметрия считается неполной и не используется как доказательство.</AlertDescription></Alert> : null}
     {error ? <Alert variant="destructive"><AlertCircle /><AlertTitle>Ответы не отправлены</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
-    <div ref={questionAreaRef} className="flex flex-col gap-4" data-testid="question-area">{attempt.questions.map((question) => <QuestionCard key={question.id} question={question} value={answers[question.id] ?? []} disabled={expired} onChange={(value) => setAnswers((current) => ({ ...current, [question.id]: value }))} />)}</div>
+    <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]"><QuestionNavigator questions={attempt.questions} answers={answers} activeIndex={activeQuestionIndex} onSelect={setActiveQuestionIndex} /><div ref={questionAreaRef} className="flex min-w-0 flex-col gap-4" data-testid="question-area">{attempt.questions[activeQuestionIndex] ? <QuestionCard question={attempt.questions[activeQuestionIndex]} value={answers[attempt.questions[activeQuestionIndex].id] ?? []} disabled={expired} onChange={(value) => { const questionId = attempt.questions[activeQuestionIndex].id; setAnswers((current) => ({ ...current, [questionId]: value })); }} /> : null}<div className="flex items-center justify-between gap-3"><Button type="button" variant="outline" onClick={() => setActiveQuestionIndex((current) => Math.max(0, current - 1))} disabled={activeQuestionIndex === 0}><ChevronLeft data-icon="inline-start" />Предыдущая</Button><span className="text-sm text-muted-foreground">Задача {activeQuestionIndex + 1} из {attempt.questions.length}</span><Button type="button" variant="outline" onClick={() => setActiveQuestionIndex((current) => Math.min(attempt.questions.length - 1, current + 1))} disabled={activeQuestionIndex === attempt.questions.length - 1}>Следующая<ChevronRight data-icon="inline-end" /></Button></div></div></div>
     {!expired ? <div className="flex flex-wrap justify-end gap-3"><Button variant="outline" onClick={() => void autosave.flush()} disabled={pending}><Save data-icon="inline-start" />Сохранить сейчас</Button><Dialog><DialogTrigger render={<Button disabled={pending} />}><Send data-icon="inline-start" />Завершить тест</DialogTrigger><DialogContent><DialogHeader><DialogTitle>Отправить ответы?</DialogTitle><DialogDescription>После отправки изменить ответы нельзя. Заполнено {answered} из {attempt.questions.length} вопросов.</DialogDescription></DialogHeader><DialogFooter><DialogClose render={<Button variant="outline" />}>Продолжить проверку</DialogClose><DialogClose render={<Button onClick={() => void submit()} />}>Отправить</DialogClose></DialogFooter></DialogContent></Dialog></div> : null}
   </div></AppShell>;
 }

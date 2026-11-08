@@ -226,17 +226,28 @@ async function buildReport(attemptId: string, reveal: boolean, includeEvents = f
 
   const [{ data: results, error: resultError }, { data: questions, error: questionError }] = await Promise.all([
     service.from("attempt_results").select("question_id,selected_option_ids,correct_option_ids,general_explanation,option_explanations,earned_points,max_points,is_correct").eq("attempt_id", attemptId),
-    service.from("questions").select("id,stable_id,text,question_options(stable_id,text),question_topics(topics(id,display_name))").eq("version_id", attempt.version_id),
+    service.from("questions").select("id,stable_id,text,question_options(stable_id,text)").eq("version_id", attempt.version_id).order("position"),
   ]);
   if (resultError) throw resultError;
   if (questionError) throw questionError;
+  const questionIds = (questions ?? []).map((question) => question.id);
+  const { data: topicLinks, error: topicLinksError } = questionIds.length
+    ? await service.from("question_topics").select("question_id,topics!inner(id,display_name)").in("question_id", questionIds)
+    : { data: [], error: null };
+  if (topicLinksError) throw topicLinksError;
+  const topicsByQuestion = new Map<string, Array<{ id: string; display_name: string }>>();
+  for (const link of topicLinks ?? []) {
+    const topic = (link as any).topics;
+    if (!topic) continue;
+    const current = topicsByQuestion.get(link.question_id) ?? [];
+    current.push(topic);
+    topicsByQuestion.set(link.question_id, current);
+  }
   const resultMap = new Map((results ?? []).map((result) => [result.question_id, result]));
   const topicMap = new Map<string, { id: string; name: string; earned: number; max: number; count: number }>();
   const items = (questions ?? []).map((question) => {
     const result = resultMap.get(question.id)!;
-    for (const link of question.question_topics ?? []) {
-      const topic = (link as any).topics;
-      if (!topic) continue;
+    for (const topic of topicsByQuestion.get(question.id) ?? []) {
       const current = topicMap.get(topic.id) ?? { id: topic.id, name: topic.display_name, earned: 0, max: 0, count: 0 };
       current.earned += Number(result?.earned_points ?? 0); current.max += Number(result?.max_points ?? 0); current.count += 1;
       topicMap.set(topic.id, current);
