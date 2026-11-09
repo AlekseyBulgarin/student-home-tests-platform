@@ -32,6 +32,37 @@ function ErrorAlert({ error }: { error: unknown }) {
 const statusLabels: Record<OperationRow["status"], string> = { not_started: "Не начата", in_progress: "Активна", submitted: "Завершена", expired: "Просрочена" };
 const completionLabels: Record<NonNullable<OperationRow["completion_reason"]>, string> = { student: "ученик", teacher: "преподаватель", deadline: "дедлайн" };
 const dashboardRefreshInterval = 5_000;
+const jsonGenerationPrompt = `Создай тест для платформы «КлассТест» по теме, уровню и числу вопросов, которые я укажу ниже.
+
+Верни ТОЛЬКО валидный JSON без Markdown, пояснений и тройных кавычек. JSON должен строго соответствовать этой схеме:
+{
+  "schema_version": 1,
+  "title": "Название до 200 символов",
+  "description": "Краткое описание до 2000 символов",
+  "settings": {
+    "time_limit_minutes": 30,
+    "disclosure_policy": "after_deadline"
+  },
+  "questions": [
+    {
+      "id": "unique-question-id",
+      "type": "single_choice",
+      "text": "Текст вопроса",
+      "options": [
+        { "id": "a", "text": "Вариант A" },
+        { "id": "b", "text": "Вариант B" }
+      ],
+      "correct_option_ids": ["a"],
+      "points": 1,
+      "topics": ["Тема"],
+      "explanation": "Короткое понятное объяснение правильного ответа"
+    }
+  ]
+}
+
+Правила: создай от 1 до 200 вопросов. ID вопросов и вариантов — уникальные латинские буквы, цифры, точка, дефис или _. У каждого вопроса 2–20 вариантов, 1–10 тем и положительное число баллов. Для single_choice в correct_option_ids должен быть ровно один вариант. Для multiple_choice перечисли все и только правильные варианты. Не используй HTML. Не добавляй поля, которых нет в схеме.
+
+Параметры теста: [впишите предмет, тему, класс/уровень, число вопросов и желаемую сложность].`;
 
 function localDateTime(value: string) {
   const date = new Date(value);
@@ -82,8 +113,12 @@ function TestsPanel({ data }: { data: Dashboard }) {
   const client = useQueryClient(); const [json, setJson] = useState(""); const preview = useMemo(() => json.trim() ? parseImport(json) : null, [json]);
   const importMutation = useMutation({ mutationFn: (test: ImportTest) => api("teacher.import_test", { test }, true), onSuccess: async () => { setJson(""); await client.invalidateQueries({ queryKey: ["dashboard"] }); toast.success("Черновик импортирован"); } });
   const publishMutation = useMutation({ mutationFn: (versionId: string) => api("teacher.publish_version", { version_id: versionId }, true), onSuccess: async () => { await client.invalidateQueries({ queryKey: ["dashboard"] }); toast.success("Версия опубликована и больше не изменяется"); } });
+  async function copyGenerationPrompt() {
+    try { await navigator.clipboard.writeText(jsonGenerationPrompt); toast.success("Шаблон промпта скопирован"); }
+    catch { toast.error("Не удалось скопировать шаблон. Разрешите доступ к буферу обмена и повторите."); }
+  }
   return <div className="flex flex-col gap-6">
-    <Card><CardHeader><CardTitle className="flex items-center gap-2"><FileJson />Импорт JSON</CardTitle><CardDescription>До публикации можно проверить структуру и ключи. Сервер повторяет полную валидацию.</CardDescription></CardHeader><CardContent><FieldGroup>
+    <Card><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="flex items-center gap-2"><FileJson />Импорт JSON</CardTitle><CardDescription>До публикации можно проверить структуру и ключи. Сервер повторяет полную валидацию.</CardDescription></div><Button type="button" variant="outline" size="sm" onClick={() => void copyGenerationPrompt()}><Clipboard data-icon="inline-start" />Скопировать промпт для нейросети</Button></div></CardHeader><CardContent><FieldGroup>
       <Field data-invalid={Boolean(preview && !preview.success)}><FieldLabel htmlFor="test-json">JSON теста</FieldLabel><Textarea id="test-json" className="min-h-56 font-mono text-xs" value={json} onChange={(event) => setJson(event.target.value)} placeholder="Вставьте JSON по формату docs/json-format.md" aria-invalid={Boolean(preview && !preview.success)} /><FieldDescription>До 1 МБ и 200 вопросов. HTML не поддерживается.</FieldDescription></Field>
       {preview && !preview.success ? <Alert variant="destructive"><AlertCircle /><AlertTitle>Ошибки импорта</AlertTitle><AlertDescription><ul className="flex list-disc flex-col gap-1 pl-5">{preview.errors.slice(0, 20).map((error) => <li key={error}>{error}</li>)}</ul></AlertDescription></Alert> : null}
       {preview?.success ? <Alert><CheckCircle2 /><AlertTitle>{preview.data.title}</AlertTitle><AlertDescription>{preview.data.questions.length} вопросов · {preview.data.questions.reduce((sum, question) => sum + question.points, 0)} баллов. Ключи проверены локально и будут сохранены в закрытой схеме.</AlertDescription></Alert> : null}
