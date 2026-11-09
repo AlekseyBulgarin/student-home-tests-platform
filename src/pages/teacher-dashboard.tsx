@@ -31,6 +31,7 @@ function ErrorAlert({ error }: { error: unknown }) {
 
 const statusLabels: Record<OperationRow["status"], string> = { not_started: "Не начата", in_progress: "Активна", submitted: "Завершена", expired: "Просрочена" };
 const completionLabels: Record<NonNullable<OperationRow["completion_reason"]>, string> = { student: "ученик", teacher: "преподаватель", deadline: "дедлайн" };
+const dashboardRefreshInterval = 5_000;
 
 function localDateTime(value: string) {
   const date = new Date(value);
@@ -177,9 +178,16 @@ function ResultsPanel({ data }: { data: Dashboard }) {
 
 export function TeacherDashboard() {
   const { session, loading } = useAuth();
-  const query = useQuery({ queryKey: ["dashboard"], queryFn: () => api<Dashboard>("teacher.dashboard", {}, true), enabled: Boolean(session) });
+  const query = useQuery({
+    queryKey: ["dashboard"],
+    queryFn: () => api<Dashboard>("teacher.dashboard", {}, true),
+    enabled: Boolean(session),
+    refetchInterval: dashboardRefreshInterval,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: "always",
+  });
   if (!loading && !session) return <Navigate to="/teacher/login" replace />;
-  return <AppShell onSignOut={() => void supabase!.auth.signOut()}><div className="flex flex-col gap-6"><div><h1 className="text-3xl font-semibold tracking-tight">Кабинет преподавателя</h1><p className="text-muted-foreground">Импортируйте тест, опубликуйте версию и назначьте её ученику.</p></div>
+  return <AppShell onSignOut={() => void supabase!.auth.signOut()}><div className="flex flex-col gap-6"><div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-3xl font-semibold tracking-tight">Кабинет преподавателя</h1><p className="text-muted-foreground">Импортируйте тест, опубликуйте версию и назначьте её ученику.</p></div><Button type="button" variant="outline" onClick={() => void query.refetch()} disabled={query.isFetching}><RefreshCcw className={query.isFetching ? "animate-spin" : undefined} data-icon="inline-start" />Обновить данные</Button></div>
     {query.error ? <ErrorAlert error={query.error} /> : null}
     {query.isLoading || !query.data ? <div className="grid gap-4 md:grid-cols-3"><Skeleton className="h-28" /><Skeleton className="h-28" /><Skeleton className="h-28" /></div> : <Tabs defaultValue="operations"><TabsList className="w-full justify-start overflow-x-auto"><TabsTrigger value="operations"><BarChart3 />Панель</TabsTrigger><TabsTrigger value="students"><Users />Ученики</TabsTrigger><TabsTrigger value="tests"><FileJson />Тесты</TabsTrigger><TabsTrigger value="assign"><Send />Назначить</TabsTrigger><TabsTrigger value="results"><BookOpenCheck />Результаты</TabsTrigger><TabsTrigger value="settings"><Settings />Настройки</TabsTrigger></TabsList><TabsContent value="operations"><OperationsPanel data={query.data} /></TabsContent><TabsContent value="students"><StudentsPanel data={query.data} /></TabsContent><TabsContent value="tests"><TestsPanel data={query.data} /></TabsContent><TabsContent value="assign"><AssignPanel data={query.data} /></TabsContent><TabsContent value="results"><ResultsPanel data={query.data} /></TabsContent><TabsContent value="settings"><div className="flex flex-col gap-6"><SettingsPanel data={query.data} /><GradeScalePanel data={query.data} /></div></TabsContent></Tabs>}
   </div></AppShell>;
