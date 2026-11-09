@@ -11,8 +11,9 @@
 | `teacher.force_finish_attempt` | `attempt_id` | Только активная собственная попытка; сервер оценивает текущие сохранённые ответы и ставит `completion_reason=teacher`. |
 | `teacher.regrade_attempt` | `attempt_id` | Только завершённая собственная попытка; ответы не меняются, результат строится заново сервером. |
 | `teacher.update_grade_scale` | `thresholds[]` | Проверяет упорядоченные пороги на Edge и в БД; не меняет исторические snapshots. |
+| `teacher.reissue_assignment_link` | `assignment_id` | Только собственное неотозванное и неистёкшее назначение; заменяет хеш токена, пишет аудит без PII и возвращает новый токен один раз. |
 
-Все новые DTO валидируются общими Zod-схемами в `supabase/functions/_shared/schema.ts`. RPC-функции доступны только `service_role` и повторяют ownership-проверку по `assignments.teacher_id`.
+Все новые DTO валидируются общими Zod-схемами в `supabase/functions/_shared/schema.ts`. Операции с изменением данных выполняются в Edge Function только после проверки JWT и принадлежности записи через `assignments.teacher_id`.
 
 ## Ученический разбор
 

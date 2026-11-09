@@ -72,6 +72,7 @@ export const createStudentSchema = z.object({
 
 export const studentIdSchema = z.object({ student_id: uuid }).strict();
 export const versionIdSchema = z.object({ version_id: uuid }).strict();
+export const assignmentIdSchema = z.object({ assignment_id: uuid }).strict();
 
 export const teacherSettingsSchema = z.object({
   retention_days: z.number().int().min(1).max(3650),

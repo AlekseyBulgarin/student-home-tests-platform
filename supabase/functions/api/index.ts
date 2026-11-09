@@ -1,6 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import {
   attemptActionSchema,
+  assignmentIdSchema,
   assignmentSchema,
   attemptEventsSchema,
   createStudentSchema,
@@ -437,6 +438,26 @@ Deno.serve(async (req) => {
         }).select("id,deadline_at").single();
         if (error) throw error;
         return reply(origin, { assignment: data, token }, 201);
+      }
+      case "teacher.reissue_assignment_link": {
+        const teacher = await requireTeacher(req, origin);
+        const dto = parseAction(origin, assignmentIdSchema, payload);
+        const { data: assignment, error: assignmentError } = await service.from("assignments")
+          .select("id,revoked_at,expires_at").eq("id", dto.assignment_id).eq("teacher_id", teacher).maybeSingle();
+        if (assignmentError) throw assignmentError;
+        if (!assignment || assignment.revoked_at || new Date(assignment.expires_at).getTime() <= Date.now()) {
+          return fail(origin, "assignment_not_available", "Назначение недоступно для перевыпуска ссылки", 404);
+        }
+        const token = randomToken();
+        const { error: updateError } = await service.from("assignments")
+          .update({ token_hash: await sha256Bytea(token), token_hint: token.slice(0, 6) })
+          .eq("id", assignment.id).eq("teacher_id", teacher);
+        if (updateError) throw updateError;
+        const { error: auditError } = await service.from("audit_log").insert({
+          teacher_id: teacher, actor_type: "teacher", action: "assignment_link_reissued", entity_type: "assignment", entity_id: assignment.id, metadata: {},
+        });
+        if (auditError) throw auditError;
+        return reply(origin, { assignment_id: assignment.id, token });
       }
       case "teacher.report": {
         const teacher = await requireTeacher(req, origin);

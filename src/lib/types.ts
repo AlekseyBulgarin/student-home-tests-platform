@@ -2,7 +2,7 @@ export type Student = { id: string; first_name: string; last_name: string; note:
 export type Version = { id: string; version_number: number; status: "draft" | "published"; published_at: string | null; title_snapshot?: string };
 export type Test = { id: string; title: string; description: string; created_at: string; test_versions: Version[] };
 export type AttemptSummary = { id: string; status: string; deadline_at_snapshot?: string; score_points: number | null; max_points: number | null; score_percent: number | null; grade_label?: string | null; completion_reason?: "student" | "teacher" | "deadline" | null; submitted_at: string | null; attempt_answers?: Array<{ question_id: string }>; attempt_events?: Array<{ id: string }> };
-export type Assignment = { id: string; student_id: string; version_id: string; deadline_at: string; revoked_at: string | null; attempts: AttemptSummary[] };
+export type Assignment = { id: string; student_id: string; version_id: string; deadline_at: string; revoked_at: string | null; expires_at?: string; attempts: AttemptSummary[] };
 export type OperationRow = {
   assignment_id: string; attempt_id: string | null; student_id: string; student_name: string;
   version_id: string; test_title: string; version_number: number;
