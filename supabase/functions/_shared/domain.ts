@@ -1,5 +1,10 @@
 export type QuestionKind = "single_choice" | "multiple_choice";
 
+export function asArray<T>(value: T | T[] | null | undefined): T[] {
+  if (value == null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
 export type ImportedQuestion = {
   id: string;
   type: QuestionKind;

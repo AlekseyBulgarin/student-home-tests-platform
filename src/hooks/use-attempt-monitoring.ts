@@ -22,21 +22,28 @@ export function useAttemptMonitoring({
   const [deliveryError, setDeliveryError] = useState(false);
   const queueRef = useRef<PendingEvent[]>([]);
   const sequenceRef = useRef(initialSequence);
-  const flushingRef = useRef(false);
+  const runningRef = useRef<Promise<void> | null>(null);
   const onFullscreenExitRef = useRef(onFullscreenExit);
   onFullscreenExitRef.current = onFullscreenExit;
 
   const flush = useCallback(async () => {
-    if (!active || flushingRef.current || !navigator.onLine || !queueRef.current.length) return;
-    flushingRef.current = true;
-    const batch = queueRef.current.splice(0, 50);
-    try {
-      await api("student.events", { session_token: sessionToken, events: batch });
-      setDeliveryError(false);
-    } catch {
-      queueRef.current = [...batch, ...queueRef.current].slice(0, 100);
-      setDeliveryError(true);
-    } finally { flushingRef.current = false; }
+    if (!active || !navigator.onLine || !queueRef.current.length) return runningRef.current ?? undefined;
+    if (runningRef.current) return runningRef.current;
+    const operation = (async () => {
+      while (navigator.onLine && queueRef.current.length) {
+        const batch = queueRef.current.splice(0, 50);
+        try {
+          await api("student.events", { session_token: sessionToken, events: batch });
+          setDeliveryError(false);
+        } catch {
+          queueRef.current = [...batch, ...queueRef.current].slice(0, 100);
+          setDeliveryError(true);
+          break;
+        }
+      }
+    })();
+    runningRef.current = operation;
+    try { await operation; } finally { runningRef.current = null; }
   }, [active, sessionToken]);
 
   useEffect(() => {

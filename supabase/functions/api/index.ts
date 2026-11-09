@@ -1,14 +1,26 @@
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 import {
   attemptActionSchema,
+  assignmentSchema,
+  attemptEventsSchema,
+  createStudentSchema,
+  emptyPayloadSchema,
   extendAttemptSchema,
   extendTestAttemptsSchema,
   formatZodIssues,
   gradeScaleSchema,
-  importedTestSchema,
+  importedTestPayloadSchema,
   operationFiltersSchema,
+  saveAnswersSchema,
+  studentIdSchema,
+  studentResolveSchema,
+  studentSessionSchema,
+  studentStartSchema,
+  submitAttemptSchema,
+  teacherSettingsSchema,
+  versionIdSchema,
 } from "../_shared/schema.ts";
-import { groupTelemetryEvents } from "../_shared/domain.ts";
+import { asArray, groupTelemetryEvents, topicStatus } from "../_shared/domain.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 // Supabase-hosted functions normally expose SUPABASE_SERVICE_ROLE_KEY. The
@@ -28,6 +40,7 @@ const DEFAULT_GRADE_THRESHOLDS = [
   { label: "3", min_percent: 50 },
   { label: "2", min_percent: 0 },
 ];
+const MAX_REQUEST_BYTES = 1_100_000;
 
 function cors(origin: string | null) {
   const allowed = origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
@@ -125,14 +138,14 @@ function asOperationRows(assignments: any[], questionCounts: Map<string, number>
       test_title: assignment.test_versions?.title_snapshot ?? "Тест",
       version_number: assignment.test_versions?.version_number ?? 0,
       status,
-      answers_count: attempt?.attempt_answers?.length ?? 0,
+      answers_count: attempt?.attempt_answers?.[0]?.count ?? 0,
       questions_count: questionCounts.get(assignment.version_id) ?? 0,
       score_points: attempt?.score_points ?? null,
       max_points: attempt?.max_points ?? null,
       score_percent: attempt?.score_percent ?? null,
       grade_label: attempt?.grade_label ?? null,
       completion_reason: attempt?.completion_reason ?? null,
-      telemetry_count: attempt?.attempt_events?.length ?? 0,
+      telemetry_count: attempt?.attempt_events?.[0]?.count ?? 0,
       deadline_at: attempt?.deadline_at_snapshot ?? assignment.deadline_at,
       submitted_at: attempt?.submitted_at ?? null,
     };
@@ -156,10 +169,17 @@ async function operationalData(teacher: string) {
     service.from("teacher_grade_scales").select("thresholds,updated_at").eq("teacher_id", teacher).maybeSingle(),
     service.from("students").select("id,first_name,last_name,note,created_at").eq("teacher_id", teacher).order("created_at", { ascending: false }),
     service.from("tests").select("id,title,description,created_at,test_versions(id,version_number,status,published_at,title_snapshot)").eq("teacher_id", teacher).order("created_at", { ascending: false }),
-    service.from("assignments").select("id,student_id,version_id,deadline_at,revoked_at,created_at,students(first_name,last_name),test_versions(version_number,title_snapshot),attempts(id,status,deadline_at_snapshot,score_points,max_points,score_percent,grade_label,completion_reason,submitted_at,attempt_answers(question_id),attempt_events(id))").eq("teacher_id", teacher).order("created_at", { ascending: false }),
+    service.from("assignments").select("id,student_id,version_id,deadline_at,revoked_at,created_at,students(first_name,last_name),test_versions(version_number,title_snapshot),attempts(id,status,deadline_at_snapshot,score_points,max_points,score_percent,grade_label,completion_reason,submitted_at,attempt_answers(count),attempt_events(count))").eq("teacher_id", teacher).order("created_at", { ascending: false }),
   ]);
   for (const result of [profileResult, scaleResult, studentsResult, testsResult, assignmentsResult]) if (result.error) throw result.error;
-  const versionIds = [...new Set((assignmentsResult.data ?? []).map((assignment) => assignment.version_id))];
+  // `assignments.attempts` is a to-one relation because assignment_id is
+  // unique. PostgREST therefore returns an object, while the public dashboard
+  // DTO intentionally exposes an array for backwards compatibility.
+  const assignments = (assignmentsResult.data ?? []).map((assignment) => ({
+    ...assignment,
+    attempts: asArray(assignment.attempts),
+  }));
+  const versionIds = [...new Set(assignments.map((assignment) => assignment.version_id))];
   const questionsResult = versionIds.length
     ? await service.from("questions").select("version_id").in("version_id", versionIds)
     : { data: [], error: null };
@@ -171,8 +191,8 @@ async function operationalData(teacher: string) {
     grade_scale: scaleResult.data ?? { thresholds: DEFAULT_GRADE_THRESHOLDS, updated_at: null },
     students: studentsResult.data,
     tests: testsResult.data,
-    assignments: assignmentsResult.data,
-    operation_rows: asOperationRows(assignmentsResult.data ?? [], questionCounts),
+    assignments,
+    operation_rows: asOperationRows(assignments, questionCounts),
   };
 }
 
@@ -219,17 +239,20 @@ async function safeAttempt(attemptId: string) {
 
 async function buildReport(attemptId: string, reveal: boolean, includeEvents = false) {
   const { data: attempt, error } = await service.from("attempts")
-    .select("id,status,completion_reason,grade_label,started_at,submitted_at,duration_seconds,score_points,max_points,score_percent,version_id,assignment_id")
+    .select("id,status,completion_reason,grade_label,started_at,submitted_at,duration_seconds,score_points,max_points,score_percent,version_id,assignment_id,assignments!inner(teacher_id)")
     .eq("id", attemptId).single();
   if (error) throw error;
   if (!reveal) return { revealed: false, attempt };
 
-  const [{ data: results, error: resultError }, { data: questions, error: questionError }] = await Promise.all([
+  const assignment = attempt.assignments as unknown as { teacher_id: string };
+  const [{ data: results, error: resultError }, { data: questions, error: questionError }, { data: settings, error: settingsError }] = await Promise.all([
     service.from("attempt_results").select("question_id,selected_option_ids,correct_option_ids,general_explanation,option_explanations,earned_points,max_points,is_correct").eq("attempt_id", attemptId),
     service.from("questions").select("id,stable_id,text,question_options(stable_id,text)").eq("version_id", attempt.version_id).order("position"),
+    service.from("teacher_profiles").select("review_below,reinforce_below").eq("id", assignment.teacher_id).single(),
   ]);
   if (resultError) throw resultError;
   if (questionError) throw questionError;
+  if (settingsError) throw settingsError;
   const questionIds = (questions ?? []).map((question) => question.id);
   const { data: topicLinks, error: topicLinksError } = questionIds.length
     ? await service.from("question_topics").select("question_id,topics!inner(id,display_name)").in("question_id", questionIds)
@@ -263,7 +286,7 @@ async function buildReport(attemptId: string, reveal: boolean, includeEvents = f
   });
   const topics = [...topicMap.values()].map((topic) => {
     const percentage = topic.max ? Math.round((topic.earned / topic.max) * 10000) / 100 : 0;
-    return { ...topic, percentage, status: percentage < 60 ? "review" : percentage < 80 ? "reinforce" : "successful", limited_evidence: topic.count < 3 };
+    return { ...topic, percentage, status: topicStatus(percentage, settings.review_below, settings.reinforce_below), limited_evidence: topic.count < 3 };
   });
   let eventIntervals: ReturnType<typeof groupTelemetryEvents> | undefined;
   if (includeEvents) {
@@ -280,11 +303,24 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(origin) });
   if (req.method !== "POST") return fail(origin, "method_not_allowed", "Используйте POST", 405);
   try {
-    const body = await req.json() as { action?: string; payload?: Json };
+    const declaredLength = Number(req.headers.get("content-length") ?? 0);
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) return fail(origin, "request_too_large", "Запрос превышает допустимый размер", 413);
+    const rawBody = await req.text();
+    if (new TextEncoder().encode(rawBody).byteLength > MAX_REQUEST_BYTES) return fail(origin, "request_too_large", "Запрос превышает допустимый размер", 413);
+    let body: { action?: string; payload?: Json };
+    try {
+      body = JSON.parse(rawBody) as { action?: string; payload?: Json };
+    } catch {
+      return fail(origin, "invalid_json", "Запрос должен содержать корректный JSON", 400);
+    }
+    if (!body || typeof body !== "object" || typeof body.action !== "string" || (body.payload != null && (typeof body.payload !== "object" || Array.isArray(body.payload)))) {
+      return fail(origin, "invalid_request", "Некорректная структура запроса", 400);
+    }
     const payload = body.payload ?? {};
     switch (body.action) {
       case "teacher.dashboard": {
         const teacher = await requireTeacher(req, origin);
+        parseAction(origin, emptyPayloadSchema, payload);
         return reply(origin, await dashboard(teacher));
       }
       case "teacher.export_attempts": {
@@ -341,77 +377,76 @@ Deno.serve(async (req) => {
       }
       case "teacher.create_student": {
         const teacher = await requireTeacher(req, origin);
-        const firstName = String(payload.first_name ?? "").trim();
-        const lastName = String(payload.last_name ?? "").trim();
-        if (!firstName || !lastName || firstName.length > 100 || lastName.length > 100) return fail(origin, "invalid_student", "Укажите имя и фамилию до 100 символов");
-        const { data, error } = await service.from("students").insert({ teacher_id: teacher, first_name: firstName, last_name: lastName, note: String(payload.note ?? "").slice(0, 1000) }).select().single();
+        const dto = parseAction(origin, createStudentSchema, payload);
+        const { data, error } = await service.from("students").insert({ teacher_id: teacher, first_name: dto.first_name, last_name: dto.last_name, note: dto.note }).select().single();
         if (error) throw error;
         return reply(origin, { student: data }, 201);
       }
       case "teacher.delete_student": {
         const teacher = await requireTeacher(req, origin);
-        const { data, error } = await service.rpc("server_delete_student", { p_teacher_id: teacher, p_student_id: String(payload.student_id ?? "") });
+        const dto = parseAction(origin, studentIdSchema, payload);
+        const { data, error } = await service.rpc("server_delete_student", { p_teacher_id: teacher, p_student_id: dto.student_id });
         if (error) throw error;
         return reply(origin, data);
       }
       case "teacher.update_settings": {
         const teacher = await requireTeacher(req, origin);
+        const dto = parseAction(origin, teacherSettingsSchema, payload);
         const { data, error } = await service.rpc("server_update_teacher_settings", {
           p_teacher_id: teacher,
-          p_retention_days: Number(payload.retention_days),
-          p_review_below: Number(payload.review_below),
-          p_reinforce_below: Number(payload.reinforce_below),
+          p_retention_days: dto.retention_days,
+          p_review_below: dto.review_below,
+          p_reinforce_below: dto.reinforce_below,
         });
         if (error) throw error;
         return reply(origin, data);
       }
       case "teacher.import_test": {
         const teacher = await requireTeacher(req, origin);
-        const raw = payload.test;
+        const raw = parseAction(origin, importedTestPayloadSchema, payload).test;
         const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
         if (bytes > 1_000_000) return fail(origin, "import_too_large", "JSON превышает 1 МБ", 413);
-        const parsed = importedTestSchema.safeParse(raw);
-        if (!parsed.success) return fail(origin, "invalid_import", "Исправьте ошибки JSON", 422, formatZodIssues(parsed.error));
-        const { data, error } = await service.rpc("server_import_test", { p_teacher_id: teacher, p_payload: parsed.data });
+        const { data, error } = await service.rpc("server_import_test", { p_teacher_id: teacher, p_payload: raw });
         if (error) throw error;
         return reply(origin, data, 201);
       }
       case "teacher.publish_version": {
         const teacher = await requireTeacher(req, origin);
-        const { data, error } = await service.rpc("server_publish_version", { p_teacher_id: teacher, p_version_id: String(payload.version_id) });
+        const dto = parseAction(origin, versionIdSchema, payload);
+        const { data, error } = await service.rpc("server_publish_version", { p_teacher_id: teacher, p_version_id: dto.version_id });
         if (error) throw error;
         return reply(origin, data);
       }
       case "teacher.assign": {
         const teacher = await requireTeacher(req, origin);
-        const studentId = String(payload.student_id ?? ""); const versionId = String(payload.version_id ?? "");
+        const dto = parseAction(origin, assignmentSchema, payload);
+        const studentId = dto.student_id; const versionId = dto.version_id;
         const [{ data: student }, { data: version }] = await Promise.all([
           service.from("students").select("id").eq("id", studentId).eq("teacher_id", teacher).maybeSingle(),
           service.from("test_versions").select("id,status,tests!inner(teacher_id)").eq("id", versionId).eq("tests.teacher_id", teacher).maybeSingle(),
         ]);
         if (!student || !version || version.status !== "published") return fail(origin, "assignment_scope", "Ученик или опубликованная версия не найдены", 404);
         const token = randomToken(); const tokenHash = await sha256Bytea(token);
-        const deadline = new Date(String(payload.deadline_at));
+        const deadline = new Date(dto.deadline_at);
         if (!Number.isFinite(deadline.getTime()) || deadline.getTime() <= Date.now()) return fail(origin, "invalid_deadline", "Дедлайн должен быть в будущем");
         const expires = new Date(deadline.getTime() + 7 * 86400000);
         const { data, error } = await service.from("assignments").insert({
           teacher_id: teacher, student_id: studentId, version_id: versionId, token_hash: tokenHash,
           token_hint: token.slice(0, 6), deadline_at: deadline.toISOString(), expires_at: expires.toISOString(),
-          disclosure_policy: payload.disclosure_policy ?? "after_deadline",
+          disclosure_policy: dto.disclosure_policy,
         }).select("id,deadline_at").single();
         if (error) throw error;
         return reply(origin, { assignment: data, token }, 201);
       }
       case "teacher.report": {
         const teacher = await requireTeacher(req, origin);
-        const attemptId = String(payload.attempt_id ?? "");
+        const attemptId = parseAction(origin, attemptActionSchema, payload).attempt_id;
         const { data: allowed } = await service.from("attempts").select("id,assignments!inner(teacher_id)").eq("id", attemptId).eq("assignments.teacher_id", teacher).maybeSingle();
         if (!allowed) return fail(origin, "not_found", "Попытка не найдена", 404);
         return reply(origin, await buildReport(attemptId, true, true));
       }
       case "student.resolve": {
-        const token = String(payload.token ?? "");
-        if (token.length < 30 || token.length > 100) return fail(origin, "invalid_link", "Ссылка недействительна", 404);
+        const token = parseAction(origin, studentResolveSchema, payload).token;
         const tokenHash = await sha256Bytea(token);
         await enforceRateLimit(origin, tokenHash, "resolve", 10);
         const { data, error } = await service.rpc("server_resolve_assignment", { p_token_hash: tokenHash });
@@ -421,10 +456,8 @@ Deno.serve(async (req) => {
         return reply(origin, { assignment: { title: assignment.test_title, student_first_name: assignment.student_first_name, student_last_name: assignment.student_last_name, deadline_at: assignment.deadline_at } });
       }
       case "student.start": {
-        const token = String(payload.token ?? "");
-        const firstName = String(payload.first_name ?? "").trim(); const lastName = String(payload.last_name ?? "").trim();
-        if (!firstName || !lastName || firstName.length > 100 || lastName.length > 100) return fail(origin, "invalid_name", "Укажите имя и фамилию");
-        if (token.length < 30 || token.length > 100) return fail(origin, "invalid_link", "Ссылка недействительна", 404);
+        const dto = parseAction(origin, studentStartSchema, payload);
+        const { token, first_name: firstName, last_name: lastName } = dto;
         const tokenHash = await sha256Bytea(token);
         await enforceRateLimit(origin, tokenHash, "start", 5);
         const { data: resolved, error: resolveError } = await service.rpc("server_resolve_assignment", { p_token_hash: tokenHash });
@@ -437,34 +470,32 @@ Deno.serve(async (req) => {
         return reply(origin, { session_token: sessionToken, ...(await safeAttempt(attemptId)) }, 201);
       }
       case "student.attempt": {
-        const attemptId = await resolveSession(payload.session_token);
+        const dto = parseAction(origin, studentSessionSchema, payload);
+        const attemptId = await resolveSession(dto.session_token);
         if (!attemptId) return fail(origin, "invalid_session", "Сессия истекла", 401);
         return reply(origin, await safeAttempt(attemptId));
       }
       case "student.save": {
-        const attemptId = await resolveSession(payload.session_token);
+        const dto = parseAction(origin, saveAnswersSchema, payload);
+        const attemptId = await resolveSession(dto.session_token);
         if (!attemptId) return fail(origin, "invalid_session", "Сессия истекла", 401);
-        const revision = Number(payload.revision); const answers = Array.isArray(payload.answers) ? payload.answers : [];
-        if (!Number.isSafeInteger(revision) || revision < 1 || answers.length > 200) return fail(origin, "invalid_save", "Некорректная ревизия или ответы");
-        const { data, error } = await service.rpc("server_save_answers", { p_attempt_id: attemptId, p_revision: revision, p_answers: answers });
+        const { data, error } = await service.rpc("server_save_answers", { p_attempt_id: attemptId, p_revision: dto.revision, p_answers: dto.answers });
         if (error) throw error;
         return reply(origin, data);
       }
       case "student.events": {
-        const attemptId = await resolveSession(payload.session_token);
+        const dto = parseAction(origin, attemptEventsSchema, payload);
+        const attemptId = await resolveSession(dto.session_token);
         if (!attemptId) return fail(origin, "invalid_session", "Сессия истекла", 401);
-        const events = Array.isArray(payload.events) ? payload.events : [];
-        if (!events.length || events.length > 50) return fail(origin, "invalid_event_batch", "Некорректный пакет событий");
-        const { data, error } = await service.rpc("server_record_events", { p_attempt_id: attemptId, p_events: events });
+        const { data, error } = await service.rpc("server_record_events", { p_attempt_id: attemptId, p_events: dto.events });
         if (error) throw error;
         return reply(origin, data);
       }
       case "student.submit": {
-        const attemptId = await resolveSession(payload.session_token);
+        const dto = parseAction(origin, submitAttemptSchema, payload);
+        const attemptId = await resolveSession(dto.session_token);
         if (!attemptId) return fail(origin, "invalid_session", "Сессия истекла", 401);
-        const idempotencyKey = String(payload.idempotency_key ?? "");
-        if (!/^[0-9a-f-]{36}$/i.test(idempotencyKey)) return fail(origin, "invalid_idempotency_key", "Некорректный ключ отправки");
-        const { error } = await service.rpc("server_submit_attempt", { p_attempt_id: attemptId, p_idempotency_key: idempotencyKey });
+        const { error } = await service.rpc("server_submit_attempt", { p_attempt_id: attemptId, p_idempotency_key: dto.idempotency_key });
         if (error) throw error;
         const { data: assignment } = await service.from("attempts").select("assignments(disclosure_policy,deadline_at,released_at)").eq("id", attemptId).single();
         const policy = (assignment as any)?.assignments;
@@ -472,7 +503,8 @@ Deno.serve(async (req) => {
         return reply(origin, await buildReport(attemptId, Boolean(reveal)));
       }
       case "student.report": {
-        const attemptId = await resolveSession(payload.session_token);
+        const dto = parseAction(origin, studentSessionSchema, payload);
+        const attemptId = await resolveSession(dto.session_token);
         if (!attemptId) return fail(origin, "invalid_session", "Сессия истекла", 401);
         const { data: assignment } = await service.from("attempts").select("assignments(disclosure_policy,deadline_at,released_at)").eq("id", attemptId).single();
         const policy = (assignment as any)?.assignments;

@@ -52,12 +52,79 @@ export const importedTestSchema = z.object({
   }
 });
 
+export const importedTestPayloadSchema = z.object({ test: importedTestSchema }).strict();
+
 export function formatZodIssues(error: z.ZodError) {
   return error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code, message: issue.message }));
 }
 
 const uuid = z.uuid();
 const isoDateTime = z.iso.datetime({ offset: true });
+const sessionToken = z.string().min(30).max(100);
+
+export const emptyPayloadSchema = z.object({}).strict();
+
+export const createStudentSchema = z.object({
+  first_name: z.string().trim().min(1).max(100),
+  last_name: z.string().trim().min(1).max(100),
+  note: z.string().max(1000).optional().default(""),
+}).strict();
+
+export const studentIdSchema = z.object({ student_id: uuid }).strict();
+export const versionIdSchema = z.object({ version_id: uuid }).strict();
+
+export const teacherSettingsSchema = z.object({
+  retention_days: z.number().int().min(1).max(3650),
+  review_below: z.number().int().min(1).max(99),
+  reinforce_below: z.number().int().min(2).max(100),
+}).strict().refine(({ review_below, reinforce_below }) => review_below < reinforce_below, {
+  path: ["reinforce_below"],
+  message: "Порог закрепления должен быть выше порога разбора",
+});
+
+export const assignmentSchema = z.object({
+  student_id: uuid,
+  version_id: uuid,
+  deadline_at: isoDateTime,
+  disclosure_policy: z.enum(["immediate", "after_deadline", "teacher_released"]).optional().default("after_deadline"),
+}).strict();
+
+export const studentResolveSchema = z.object({ token: sessionToken }).strict();
+export const studentStartSchema = z.object({
+  token: sessionToken,
+  first_name: z.string().trim().min(1).max(100),
+  last_name: z.string().trim().min(1).max(100),
+}).strict();
+export const studentSessionSchema = z.object({ session_token: sessionToken }).strict();
+
+const savedAnswerSchema = z.object({
+  question_id: uuid,
+  selected_option_ids: z.array(stableId).max(20),
+}).strict();
+
+export const saveAnswersSchema = z.object({
+  session_token: sessionToken,
+  revision: z.number().int().positive().safe(),
+  answers: z.array(savedAnswerSchema).max(200),
+}).strict();
+
+const eventSchema = z.object({
+  event_id: uuid,
+  sequence: z.number().int().positive().safe(),
+  type: z.enum(["fullscreen_enter", "fullscreen_exit", "visibility_visible", "visibility_hidden", "window_focus", "window_blur", "copy_attempt", "online", "offline"]),
+  client_occurred_at: isoDateTime,
+  payload: z.record(z.string(), z.unknown()).optional().default({}),
+}).strict();
+
+export const attemptEventsSchema = z.object({
+  session_token: sessionToken,
+  events: z.array(eventSchema).min(1).max(50),
+}).strict();
+
+export const submitAttemptSchema = z.object({
+  session_token: sessionToken,
+  idempotency_key: uuid,
+}).strict();
 
 export const operationFiltersSchema = z.object({
   search: z.string().trim().max(200).optional().default(""),
